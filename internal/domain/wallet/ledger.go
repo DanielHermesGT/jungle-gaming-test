@@ -34,8 +34,8 @@ func (e LedgerEntry) BalanceBefore() money.Money { return e.balanceBefore }
 func (e LedgerEntry) BalanceAfter() money.Money  { return e.balanceAfter }
 func (e LedgerEntry) CreatedAt() time.Time       { return e.createdAt }
 
-// RehydrateLedgerEntry rebuilds a ledger entry from persisted state without creating a new movement.
-func RehydrateLedgerEntry(
+// LedgerEntryFromPersisted rebuilds a ledger entry from persisted state without creating a new movement.
+func LedgerEntryFromPersisted(
 	id, walletID, transactionID string,
 	direction Direction,
 	amount, balanceBefore, balanceAfter money.Money,

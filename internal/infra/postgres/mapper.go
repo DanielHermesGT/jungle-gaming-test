@@ -23,7 +23,7 @@ func (r walletRow) toDomain() (wallet.Wallet, error) {
 	if err != nil {
 		return wallet.Wallet{}, fmt.Errorf("postgres: wallet money: %w", err)
 	}
-	return wallet.Rehydrate(r.id, r.playerID, bal, r.version, r.createdAt, r.updatedAt)
+	return wallet.WalletFromPersisted(r.id, r.playerID, bal, r.version, r.createdAt, r.updatedAt)
 }
 
 type ledgerRow struct {
@@ -51,7 +51,7 @@ func (r ledgerRow) toDomain() (wallet.LedgerEntry, error) {
 	if err != nil {
 		return wallet.LedgerEntry{}, fmt.Errorf("postgres: ledger after: %w", err)
 	}
-	return wallet.RehydrateLedgerEntry(
+	return wallet.LedgerEntryFromPersisted(
 		r.id,
 		r.walletID,
 		r.transactionID,

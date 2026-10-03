@@ -72,7 +72,7 @@ Erros sentinela classificáveis com `errors.Is`:
 
 - Campos: `id`, `playerId`, saldo (`money.Money`), `version`, `createdAt`, `updatedAt`.
 - O saldo só muda por `Open` (saldo inicial), `Credit` e `Debit`.
-- `Rehydrate` reconstrói o estado persistido sem reaplicar movimentos nem gerar ledger.
+- `WalletFromPersisted` / `LedgerEntryFromPersisted` reconstroem estado persistido sem reaplicar movimentos nem gerar ledger.
 - IDs e timestamps são fornecidos pela camada de aplicação (o domínio não gera UUID).
 
 ### Abertura

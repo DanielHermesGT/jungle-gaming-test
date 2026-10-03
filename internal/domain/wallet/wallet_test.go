@@ -223,17 +223,17 @@ func TestCurrencyMismatchAndInvalidMovement(t *testing.T) {
 	}
 }
 
-func TestRehydrateThenDebit(t *testing.T) {
+func TestWalletFromPersistedThenDebit(t *testing.T) {
 	t.Parallel()
 
 	now := time.Unix(10, 0).UTC()
 	bal := mustParse(t, "100.00", "BRL")
-	w, err := wallet.Rehydrate("wallet-1", "player-1", bal, 1, now, now)
+	w, err := wallet.WalletFromPersisted("wallet-1", "player-1", bal, 1, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if w.Version() != 1 || !w.Balance().Equal(bal) {
-		t.Fatal("rehydrate must preserve state")
+		t.Fatal("WalletFromPersisted must preserve state")
 	}
 
 	res, err := w.Debit("ledger-1", "tx-1", mustParse(t, "40.00", "BRL"), now.Add(time.Minute))

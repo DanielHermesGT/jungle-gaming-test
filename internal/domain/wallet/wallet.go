@@ -69,8 +69,8 @@ func Open(p OpenParams) (OpenResult, error) {
 	return OpenResult{Wallet: w, Ledger: &entry}, nil
 }
 
-// Rehydrate rebuilds a wallet from persisted state without reapplying movements.
-func Rehydrate(id, playerID string, balance money.Money, version int64, createdAt, updatedAt time.Time) (Wallet, error) {
+// WalletFromPersisted rebuilds a wallet from persisted state without reapplying movements.
+func WalletFromPersisted(id, playerID string, balance money.Money, version int64, createdAt, updatedAt time.Time) (Wallet, error) {
 	if id == "" {
 		return Wallet{}, ErrInvalidWallet
 	}
