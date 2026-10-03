@@ -37,6 +37,11 @@ func (s stubWallet) Reconcile(ctx context.Context, id string) (usecasewallet.Rec
 	return s.reconcileFn(ctx, id)
 }
 
+func withAuth(req *http.Request) *http.Request {
+	req.Header.Set("Authorization", "Bearer test-token")
+	return req
+}
+
 func TestOpenCreated(t *testing.T) {
 	bal := mustParse(t, "100.00", "BRL")
 	h := web.NewWalletHandlerForTest(stubWallet{
@@ -49,10 +54,10 @@ func TestOpenCreated(t *testing.T) {
 			}, nil
 		},
 	})
-	mux := web.NewRouter(h, web.NewHealthHandlerForTest())
+	mux := web.NewRouter(h, web.NewHealthHandlerForTest(), web.NewInternalAuthForTest())
 
 	body := `{"playerId":"player-1","initialBalance":{"amount":"100.00","currency":"BRL"}}`
-	req := httptest.NewRequest(http.MethodPost, "/wallets", bytes.NewBufferString(body))
+	req := withAuth(httptest.NewRequest(http.MethodPost, "/wallets", bytes.NewBufferString(body)))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -68,15 +73,41 @@ func TestOpenCreated(t *testing.T) {
 	}
 }
 
+func TestOpenUnauthorized(t *testing.T) {
+	h := web.NewWalletHandlerForTest(stubWallet{})
+	mux := web.NewRouter(h, web.NewHealthHandlerForTest(), web.NewInternalAuthForTest())
+
+	body := `{"playerId":"p","initialBalance":{"amount":"0.00","currency":"BRL"}}`
+	req := httptest.NewRequest(http.MethodPost, "/wallets", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d", rec.Code)
+	}
+}
+
+func TestOpenForbiddenForProvider(t *testing.T) {
+	h := web.NewWalletHandlerForTest(stubWallet{})
+	mux := web.NewRouter(h, web.NewHealthHandlerForTest(), web.NewProviderAuthForTest())
+
+	body := `{"playerId":"p","initialBalance":{"amount":"0.00","currency":"BRL"}}`
+	req := withAuth(httptest.NewRequest(http.MethodPost, "/wallets", bytes.NewBufferString(body)))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGetNotFound(t *testing.T) {
 	h := web.NewWalletHandlerForTest(stubWallet{
 		getFn: func(context.Context, string) (usecasewallet.WalletView, error) {
 			return usecasewallet.WalletView{}, usecase.ErrNotFound
 		},
 	})
-	mux := web.NewRouter(h, web.NewHealthHandlerForTest())
+	mux := web.NewRouter(h, web.NewHealthHandlerForTest(), web.NewInternalAuthForTest())
 
-	req := httptest.NewRequest(http.MethodGet, "/wallets/missing", nil)
+	req := withAuth(httptest.NewRequest(http.MethodGet, "/wallets/missing", nil))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
@@ -90,10 +121,10 @@ func TestOpenConflict(t *testing.T) {
 			return usecasewallet.WalletView{}, usecase.ErrConflict
 		},
 	})
-	mux := web.NewRouter(h, web.NewHealthHandlerForTest())
+	mux := web.NewRouter(h, web.NewHealthHandlerForTest(), web.NewInternalAuthForTest())
 
 	body := `{"playerId":"dup","initialBalance":{"amount":"0.00","currency":"BRL"}}`
-	req := httptest.NewRequest(http.MethodPost, "/wallets", bytes.NewBufferString(body))
+	req := withAuth(httptest.NewRequest(http.MethodPost, "/wallets", bytes.NewBufferString(body)))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
@@ -120,9 +151,9 @@ func TestListLedgerQuery(t *testing.T) {
 			}, nil
 		},
 	})
-	mux := web.NewRouter(h, web.NewHealthHandlerForTest())
+	mux := web.NewRouter(h, web.NewHealthHandlerForTest(), web.NewInternalAuthForTest())
 
-	req := httptest.NewRequest(http.MethodGet, "/wallets/w1/ledger?cursor=cur&limit=2", nil)
+	req := withAuth(httptest.NewRequest(http.MethodGet, "/wallets/w1/ledger?cursor=cur&limit=2", nil))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -149,9 +180,9 @@ func TestReconcileOK(t *testing.T) {
 			}, nil
 		},
 	})
-	mux := web.NewRouter(h, web.NewHealthHandlerForTest())
+	mux := web.NewRouter(h, web.NewHealthHandlerForTest(), web.NewInternalAuthForTest())
 
-	req := httptest.NewRequest(http.MethodPost, "/wallets/w1/reconciliation", nil)
+	req := withAuth(httptest.NewRequest(http.MethodPost, "/wallets/w1/reconciliation", nil))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -159,8 +190,8 @@ func TestReconcileOK(t *testing.T) {
 	}
 }
 
-func TestHealthLive(t *testing.T) {
-	mux := web.NewRouter(web.NewWalletHandlerForTest(stubWallet{}), web.NewHealthHandlerForTest())
+func TestHealthLivePublic(t *testing.T) {
+	mux := web.NewRouter(web.NewWalletHandlerForTest(stubWallet{}), web.NewHealthHandlerForTest(), web.NewInternalAuthForTest())
 	req := httptest.NewRequest(http.MethodGet, "/health/live", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)

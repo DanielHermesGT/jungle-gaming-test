@@ -109,10 +109,12 @@ internal/
   database/     # adapters Postgres (pgx, SQL explícito) + fx.Module
   usecase/      # um pacote por módulo (ex.: wallet/)
   web/          # HTTP handlers + router (net/http ServeMux)
-  config/       # env (HTTP_ADDR, DATABASE_URL)
+  auth/         # JWT/OIDC middleware (Keycloak JWKS)
+  config/       # env (HTTP_ADDR, DATABASE_URL, OIDC_*)
   app/          # composição Fx dos módulos
 pkg/            # idgen, clock
 cmd/server/     # fx.New(app.Module).Run()
+deploy/keycloak/# realm import
 ```
 
 Wallet e `LedgerEntry` ficam no **mesmo** pacote `internal/domain/wallet`. O ledger não é agregado independente; nasce só com mudança de saldo. Persistência: duas tabelas e dois repos em `internal/database`.
@@ -201,7 +203,7 @@ Módulo `internal/usecase/wallet` — um `UseCase` com métodos:
 
 ## HTTP + Uber Fx
 
-Composição em `internal/app` via `fx.Module`s: `config` → `database` → `usecase/wallet` → `web`.
+Composição em `internal/app` via `fx.Module`s: `config` → `auth` → `database` → `usecase/wallet` → `web`.
 
 `fx.Lifecycle`:
 - `OnStart`: `http.Server.ListenAndServe` em goroutine
@@ -209,17 +211,36 @@ Composição em `internal/app` via `fx.Module`s: `config` → `database` → `us
 
 Rotas (`net/http` ServeMux):
 
-| Método | Path |
-| --- | --- |
-| `POST` | `/wallets` |
-| `GET` | `/wallets/{walletId}` |
-| `GET` | `/wallets/{walletId}/ledger` |
-| `POST` | `/wallets/{walletId}/reconciliation` |
-| `GET` | `/health/live` |
-| `GET` | `/health/ready` (ping Postgres; SQS TODO) |
+| Método | Path | Auth |
+| --- | --- | --- |
+| `POST` | `/wallets` | JWT + role `wallet-internal` |
+| `GET` | `/wallets/{walletId}` | JWT + role `wallet-internal` |
+| `GET` | `/wallets/{walletId}/ledger` | JWT + role `wallet-internal` |
+| `POST` | `/wallets/{walletId}/reconciliation` | JWT + role `wallet-internal` |
+| `GET` | `/health/live` | público |
+| `GET` | `/health/ready` | público (ping Postgres; SQS TODO) |
 
-Erros de use case → HTTP: `400` invalid, `404` not found, `409` conflict, `500` demais.
+Erros de use case → HTTP: `400` invalid, `404` not found, `409` conflict, `500` demais.  
+Auth → `401` unauthorized, `403` forbidden.
 
-### Auth (próximo passo)
+## Autenticação e autorização
 
-**Ainda não implementada.** README §2 exige IdP (Keycloak) e restringe `/wallets*` ao serviço interno — eliminatório. Próxima fatia: JWT via JWKS + role/claim interna; health permanece público.
+### IdP
+
+**Keycloak** no Docker Compose (`deploy/keycloak/realm-jungle.json`), fluxo `client_credentials` entre serviços. A API **não** emite tokens nem cadastra senhas.
+
+Validação: `github.com/coreos/go-oidc/v3` — discovery do issuer + JWKS, verificação de assinatura/`exp`/`iss`/`aud`. Boot falha se `OIDC_ISSUER_URL` estiver ausente ou o IdP inacessível (fail-fast).
+
+### Modelo
+
+| Ator | Client | Claims / roles | Acesso |
+| --- | --- | --- | --- |
+| Serviço interno | `jungle-internal` | realm role `wallet-internal`; `aud` inclui `jungle-api` | `/wallets*` |
+| Provedor | `provider-a` | claim `provider_id`; sem role interna | futuras rotas wagering (isolamento por `providerId`); **403** em wallet |
+| Anônimo | — | — | só health |
+
+`Principal` no `context` (`subject`, `roles`, `providerId`) — uso em logs e authz futura (`RequireProvider`). Domínio permanece sem dependência de auth.
+
+### Por que wallet = interno
+
+README §2: operações de carteira restritas ao serviço interno; provedores só acessam as próprias transações de wagering. Abertura/leitura/reconciliação de carteira não são APIs de provedor.

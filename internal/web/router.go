@@ -1,21 +1,23 @@
 package web
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/auth"
+)
 
 // NewRouter mounts HTTP routes.
-//
-// TODO(futuro): proteger /wallets* com Keycloak JWT (JWKS) + role de serviço interno
-// (README §2 — eliminatório). Health permanece público.
-func NewRouter(wallets *WalletHandler, health *HealthHandler) http.Handler {
+// Health is public. /wallets* require JWT + internal role (README §2).
+func NewRouter(wallets *WalletHandler, health *HealthHandler, mw *auth.Middleware) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health/live", health.Live)
 	mux.HandleFunc("GET /health/ready", health.Ready)
 
-	mux.HandleFunc("POST /wallets", wallets.Open)
-	mux.HandleFunc("GET /wallets/{walletId}", wallets.Get)
-	mux.HandleFunc("GET /wallets/{walletId}/ledger", wallets.ListLedger)
-	mux.HandleFunc("POST /wallets/{walletId}/reconciliation", wallets.Reconcile)
+	mux.Handle("POST /wallets", mw.ProtectInternal(http.HandlerFunc(wallets.Open)))
+	mux.Handle("GET /wallets/{walletId}", mw.ProtectInternal(http.HandlerFunc(wallets.Get)))
+	mux.Handle("GET /wallets/{walletId}/ledger", mw.ProtectInternal(http.HandlerFunc(wallets.ListLedger)))
+	mux.Handle("POST /wallets/{walletId}/reconciliation", mw.ProtectInternal(http.HandlerFunc(wallets.Reconcile)))
 
 	return mux
 }
