@@ -1,4 +1,4 @@
-package postgres
+package database
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wallet"
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/gateway"
 )
 
 type WalletRepo struct{}
@@ -16,7 +17,9 @@ func NewWalletRepo() *WalletRepo {
 	return &WalletRepo{}
 }
 
-func (r *WalletRepo) Insert(ctx context.Context, q Querier, w wallet.Wallet) error {
+var _ gateway.WalletRepository = (*WalletRepo)(nil)
+
+func (r *WalletRepo) Insert(ctx context.Context, q gateway.Querier, w wallet.Wallet) error {
 	const sql = `
 INSERT INTO wallets (id, player_id, currency, balance_minor, version, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7)`
@@ -34,12 +37,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)`
 		return fmt.Errorf("%w: wallet player/currency", ErrConflict)
 	}
 	if err != nil {
-		return fmt.Errorf("postgres: insert wallet: %w", err)
+		return fmt.Errorf("database: insert wallet: %w", err)
 	}
 	return nil
 }
 
-func (r *WalletRepo) GetByID(ctx context.Context, q Querier, id string) (wallet.Wallet, error) {
+func (r *WalletRepo) GetByID(ctx context.Context, q gateway.Querier, id string) (wallet.Wallet, error) {
 	const sql = `
 SELECT id, player_id, currency, balance_minor, version, created_at, updated_at
 FROM wallets
@@ -48,7 +51,7 @@ WHERE id = $1`
 }
 
 // GetByIDForUpdate locks the wallet row for the current transaction (pessimistic concurrency).
-func (r *WalletRepo) GetByIDForUpdate(ctx context.Context, q Querier, id string) (wallet.Wallet, error) {
+func (r *WalletRepo) GetByIDForUpdate(ctx context.Context, q gateway.Querier, id string) (wallet.Wallet, error) {
 	const sql = `
 SELECT id, player_id, currency, balance_minor, version, created_at, updated_at
 FROM wallets
@@ -57,7 +60,7 @@ FOR UPDATE`
 	return r.scanOne(ctx, q, sql, id)
 }
 
-func (r *WalletRepo) Update(ctx context.Context, q Querier, w wallet.Wallet) error {
+func (r *WalletRepo) Update(ctx context.Context, q gateway.Querier, w wallet.Wallet) error {
 	const sql = `
 UPDATE wallets
 SET balance_minor = $2,
@@ -72,7 +75,7 @@ WHERE id = $1`
 		w.UpdatedAt(),
 	)
 	if err != nil {
-		return fmt.Errorf("postgres: update wallet: %w", err)
+		return fmt.Errorf("database: update wallet: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
@@ -80,7 +83,7 @@ WHERE id = $1`
 	return nil
 }
 
-func (r *WalletRepo) scanOne(ctx context.Context, q Querier, sql string, id string) (wallet.Wallet, error) {
+func (r *WalletRepo) scanOne(ctx context.Context, q gateway.Querier, sql string, id string) (wallet.Wallet, error) {
 	var row walletRow
 	err := q.QueryRow(ctx, sql, id).Scan(
 		&row.id,
@@ -95,7 +98,7 @@ func (r *WalletRepo) scanOne(ctx context.Context, q Querier, sql string, id stri
 		return wallet.Wallet{}, ErrNotFound
 	}
 	if err != nil {
-		return wallet.Wallet{}, fmt.Errorf("postgres: get wallet: %w", err)
+		return wallet.Wallet{}, fmt.Errorf("database: get wallet: %w", err)
 	}
 	// CHAR(3) may come padded; trim for domain validation.
 	row.currency = trimCurrency(row.currency)

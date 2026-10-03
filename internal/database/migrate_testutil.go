@@ -1,4 +1,4 @@
-package postgres
+package database
 
 import (
 	"context"
@@ -52,6 +52,6 @@ func migrationPath(name string) string {
 	if !ok {
 		return filepath.Join("migrations", name)
 	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 	return filepath.Join(root, "migrations", name)
 }

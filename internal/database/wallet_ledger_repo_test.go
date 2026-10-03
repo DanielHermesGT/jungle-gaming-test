@@ -1,4 +1,4 @@
-package postgres_test
+package database_test
 
 import (
 	"context"
@@ -6,18 +6,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/database"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/money"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wallet"
-	"github.com/DanielHermesGT/jungle-gaming-test/internal/infra/postgres"
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/gateway"
 )
 
 func TestInsertWalletAndLedgerSameTx(t *testing.T) {
-	db := postgres.OpenTestDB(t)
+	db := database.OpenTestDB(t)
 	ctx := context.Background()
-	wallets := postgres.NewWalletRepo()
-	ledgers := postgres.NewLedgerRepo()
+	wallets := database.NewWalletRepo()
+	ledgers := database.NewLedgerRepo()
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 
 	opened, err := wallet.Open(wallet.OpenParams{
@@ -34,11 +33,11 @@ func TestInsertWalletAndLedgerSameTx(t *testing.T) {
 
 	// Atomicidade: wallet + ledger no mesmo Commit.
 	// TODO(futuro): incluir wager/inbox/outbox nesta mesma Tx.
-	err = db.WithinTx(ctx, func(tx pgx.Tx) error {
-		if err := wallets.Insert(ctx, tx, opened.Wallet); err != nil {
+	err = db.WithinTx(ctx, func(q gateway.Querier) error {
+		if err := wallets.Insert(ctx, q, opened.Wallet); err != nil {
 			return err
 		}
-		return ledgers.Insert(ctx, tx, *opened.Ledger)
+		return ledgers.Insert(ctx, q, *opened.Ledger)
 	})
 	if err != nil {
 		t.Fatalf("persist: %v", err)
@@ -62,9 +61,9 @@ func TestInsertWalletAndLedgerSameTx(t *testing.T) {
 }
 
 func TestInsertWalletConflictSamePlayerCurrency(t *testing.T) {
-	db := postgres.OpenTestDB(t)
+	db := database.OpenTestDB(t)
 	ctx := context.Background()
-	wallets := postgres.NewWalletRepo()
+	wallets := database.NewWalletRepo()
 	now := time.Unix(1, 0).UTC()
 
 	first, err := wallet.Open(wallet.OpenParams{
@@ -90,16 +89,16 @@ func TestInsertWalletConflictSamePlayerCurrency(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = wallets.Insert(ctx, db.Pool, second.Wallet)
-	if !errors.Is(err, postgres.ErrConflict) {
+	if !errors.Is(err, database.ErrConflict) {
 		t.Fatalf("err=%v want conflict", err)
 	}
 }
 
 func TestGetByIDForUpdateAndUpdate(t *testing.T) {
-	db := postgres.OpenTestDB(t)
+	db := database.OpenTestDB(t)
 	ctx := context.Background()
-	wallets := postgres.NewWalletRepo()
-	ledgers := postgres.NewLedgerRepo()
+	wallets := database.NewWalletRepo()
+	ledgers := database.NewLedgerRepo()
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 
 	opened, err := wallet.Open(wallet.OpenParams{
@@ -113,18 +112,18 @@ func TestGetByIDForUpdateAndUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = db.WithinTx(ctx, func(tx pgx.Tx) error {
-		if err := wallets.Insert(ctx, tx, opened.Wallet); err != nil {
+	err = db.WithinTx(ctx, func(q gateway.Querier) error {
+		if err := wallets.Insert(ctx, q, opened.Wallet); err != nil {
 			return err
 		}
-		return ledgers.Insert(ctx, tx, *opened.Ledger)
+		return ledgers.Insert(ctx, q, *opened.Ledger)
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = db.WithinTx(ctx, func(tx pgx.Tx) error {
-		locked, err := wallets.GetByIDForUpdate(ctx, tx, "wallet-2")
+	err = db.WithinTx(ctx, func(q gateway.Querier) error {
+		locked, err := wallets.GetByIDForUpdate(ctx, q, "wallet-2")
 		if err != nil {
 			return err
 		}
@@ -132,10 +131,10 @@ func TestGetByIDForUpdateAndUpdate(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if err := wallets.Update(ctx, tx, moved.Wallet); err != nil {
+		if err := wallets.Update(ctx, q, moved.Wallet); err != nil {
 			return err
 		}
-		return ledgers.Insert(ctx, tx, moved.Ledger)
+		return ledgers.Insert(ctx, q, moved.Ledger)
 	})
 	if err != nil {
 		t.Fatalf("debit tx: %v", err)

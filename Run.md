@@ -1,6 +1,6 @@
 # Como rodar o projeto
 
-Guia prático do estado atual: domínio (`Money` / `Wallet`) + Postgres (repos e migrations).  
+Guia prático do estado atual: domínio + gateway + database + use cases de carteira.  
 Ainda **não** há servidor HTTP / Keycloak / SQS.
 
 ## Pré-requisitos
@@ -76,14 +76,14 @@ Somente domínio (não precisa de Docker):
 go test ./internal/domain/... -race
 ```
 
-Repos + integração Postgres (precisa do Compose + `DATABASE_URL`):
+Repos + use cases (precisa do Compose + `DATABASE_URL`):
 
 ```sh
 export DATABASE_URL='postgres://jungle:jungle@localhost:5432/jungle?sslmode=disable'
-go test ./internal/infra/postgres/ -v -count=1
+go test ./internal/database/ ./internal/usecase/wallet/ -v -count=1
 ```
 
-Sem `DATABASE_URL`, os testes de integração dos repos são **pulados** (`Skip`).
+Sem `DATABASE_URL`, os testes de integração são **pulados** (`Skip`).
 
 Tudo que já existe:
 
@@ -98,7 +98,7 @@ go vet ./...
 docker compose up -d
 export DATABASE_URL='postgres://jungle:jungle@localhost:5432/jungle?sslmode=disable'
 docker compose exec -T postgres psql -U jungle -d jungle < migrations/000001_wallets_ledger.up.sql
-go test ./internal/domain/... ./internal/infra/postgres/ -race -count=1
+go test ./internal/domain/... ./internal/database/ ./internal/usecase/wallet/ -race -count=1
 ```
 
 ## O que ainda não roda

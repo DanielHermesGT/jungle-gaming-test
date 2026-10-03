@@ -100,7 +100,19 @@ Movimentos exigem amount **> 0** e a mesma moeda da carteira. Débito com saldo 
 
 ### Organização de pacotes
 
-Wallet e `LedgerEntry` ficam no **mesmo** pacote `internal/domain/wallet`. O ledger não é agregado independente; nasce só com mudança de saldo. Na infra há duas tabelas e dois repos (`wallet_repo`, `ledger_repo`) no pacote `internal/infra/postgres`.
+Inspirada em clean architecture (referência interna `pratico-ms-vEDA`), adaptada ao README:
+
+```text
+internal/
+  domain/       # Money, Wallet, LedgerEntry (mantido; não "entity" — Money é VO)
+  gateway/      # ports (interfaces de repositório + Querier/TxRunner)
+  database/     # adapters Postgres (pgx, SQL explícito)
+  usecase/      # um pacote por módulo (ex.: wallet/)
+pkg/            # idgen, clock
+cmd/            # entrypoints (HTTP futuro)
+```
+
+Wallet e `LedgerEntry` ficam no **mesmo** pacote `internal/domain/wallet`. O ledger não é agregado independente; nasce só com mudança de saldo. Persistência: duas tabelas e dois repos em `internal/database`.
 
 ### Concorrência
 
@@ -152,7 +164,7 @@ Wallet + ledger da mesma operação financeira **nunca** em commits separados. Q
 | `wallets` | estado atual (`balance_minor` BIGINT + currency, version) |
 | `wallet_ledger_entries` | lançamentos imutáveis (append-only) |
 
-Migrations em `migrations/`. Repos em `internal/infra/postgres` (pgx, SQL explícito). Ambiente local: `docker compose up -d` (somente Postgres nesta fase).
+Migrations em `migrations/`. Repos em `internal/database` (pgx, SQL explícito). Ambiente local: `docker compose up -d` (somente Postgres nesta fase).
 
 Aplicar migrations (exemplo):
 
@@ -168,4 +180,18 @@ psql "$DATABASE_URL" -f migrations/000001_wallets_ledger.up.sql
 - `ErrInvalidMovement` / `ErrInvalidLedger`
 - `ErrUninitialized`
 - reutiliza `money.ErrCurrencyMismatch` quando a moeda do movimento diverge
-- infra: `postgres.ErrConflict`, `postgres.ErrNotFound`
+- gateway/database: `ErrConflict`, `ErrNotFound`
+- usecase: `ErrConflict`, `ErrNotFound`, `ErrInvalidInput`
+
+## Application — use cases de carteira
+
+Módulo `internal/usecase/wallet` — um `UseCase` com métodos (sem HTTP ainda):
+
+| Método | Papel |
+| --- | --- |
+| `Open` | cria wallet (+ ledger se saldo > 0) na mesma TX |
+| `Get` | leitura por id |
+| `ListLedger` | ledger com cursor opaco `(created_at, id)` |
+| `Reconcile` | saldo armazenado vs ΣCREDIT−ΣDEBIT; não altera saldo |
+
+`Open` com saldo positivo ainda **não** persiste `WagerTransaction OPENING` nem outbox — `TODO(futuro)`. Wallet + ledger da abertura já vão no mesmo `Commit`.
