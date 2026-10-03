@@ -48,7 +48,7 @@ Não há normalização de formas equivalentes. O amount que entra no hash de id
 
 - `Parse` / `UnmarshalJSON` (entrada externa): negativos são inválidos.
 - Uso interno (`FromMinor`, `Sub`, `Neg`): negativos são permitidos para diferenças e cálculos.
-- Saldo de carteira não-negativo permanece responsabilidade do agregado `Wallet` e das constraints do banco (ainda não implementados).
+- Saldo de carteira não-negativo é responsabilidade do agregado `Wallet` (e, depois, das constraints do banco).
 
 ### Erros
 
@@ -63,3 +63,62 @@ Erros sentinela classificáveis com `errors.Is`:
 ### Serialização
 
 `AmountString` e `MarshalJSON` sempre emitem duas casas decimais. `UnmarshalJSON` reutiliza `Parse`.
+
+## Wallet
+
+### Agregado
+
+`Wallet` em `internal/domain/wallet` é a raiz do agregado financeiro.
+
+- Campos: `id`, `playerId`, saldo (`money.Money`), `version`, `createdAt`, `updatedAt`.
+- O saldo só muda por `Open` (saldo inicial), `Credit` e `Debit`.
+- `Rehydrate` reconstrói o estado persistido sem reaplicar movimentos nem gerar ledger.
+- IDs e timestamps são fornecidos pela camada de aplicação (o domínio não gera UUID).
+
+### Abertura
+
+| Saldo inicial | Efeito |
+| --- | --- |
+| `0.00` | Wallet com `version = 1`, sem lançamento de ledger |
+| `> 0` | Wallet com `version = 1` + um `CREDIT` de abertura no ledger (`balanceBefore = 0`) |
+
+A transação de negócio `OPENING` / eventos de outbox ficam na application layer; o domínio wallet apenas materializa saldo + ledger de abertura.
+
+### Ledger
+
+`LedgerEntry` é imutável. Cada `Credit`/`Debit` bem-sucedido produz exatamente um lançamento com:
+
+- direção `CREDIT` ou `DEBIT`
+- `balanceAfter = balanceBefore ± amount` (validado na construção)
+- vínculo a `walletId` e `transactionId`
+
+`LOSS` e rejeições (ainda não modelados aqui) não devem chamar `Credit`/`Debit`.
+
+Movimentos exigem amount **> 0** e a mesma moeda da carteira. Débito com saldo insuficiente retorna `ErrInsufficientFunds` sem alterar o agregado.
+
+`version` inicia em `1` e incrementa **somente** quando o saldo muda (`Credit`/`Debit`).
+
+### Concorrência (planejada na persistência)
+
+No domínio, a versão acompanha mudanças de saldo. Entre processos, a aplicação usará:
+
+1. `SELECT … FOR UPDATE` na linha da carteira dentro da TX SQL (lock por carteira, nunca global)
+2. persistência atômica de saldo + ledger (+ demais registros da operação)
+3. constraints no banco: unicidade `(player_id, currency)`, unicidade `(wallet_id, transaction_id)`, saldo ≥ 0, ledger append-only (sem update/delete)
+
+Assim evitamos lost updates e saldo negativo mesmo com várias instâncias.
+
+### Persistência (planejada)
+
+| Tabela | Papel |
+| --- | --- |
+| `wallets` | estado atual (saldo em `BIGINT` minor + currency, version) |
+| `wallet_ledger_entries` | lançamentos imutáveis |
+
+### Erros
+
+- `ErrInvalidWallet` / `ErrInvalidPlayer`
+- `ErrInsufficientFunds`
+- `ErrInvalidMovement` / `ErrInvalidLedger`
+- `ErrUninitialized`
+- reutiliza `money.ErrCurrencyMismatch` quando a moeda do movimento diverge

@@ -14,6 +14,34 @@ type Money struct {
 	currency string
 }
 
+type moneyJSON struct {
+	Amount   string `json:"amount"`
+	Currency string `json:"currency"`
+}
+
+func (m Money) MarshalJSON() ([]byte, error) {
+	if !m.valid() {
+		return nil, ErrUninitialized
+	}
+	return json.Marshal(moneyJSON{
+		Amount:   m.AmountString(),
+		Currency: m.currency,
+	})
+}
+
+func (m *Money) UnmarshalJSON(b []byte) error {
+	var raw moneyJSON
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidAmount, err)
+	}
+	parsed, err := Parse(raw.Amount, raw.Currency)
+	if err != nil {
+		return err
+	}
+	*m = parsed
+	return nil
+}
+
 // FromMinor builds Money from minor units. Negative values are allowed for internal use.
 func FromMinor(minor int64, currency string) (Money, error) {
 	if err := validateCurrency(currency); err != nil {
@@ -48,12 +76,6 @@ func (m Money) AmountString() string {
 	minor := m.minor
 	if minor < 0 {
 		sign = "-"
-		// MinInt64 cannot be negated; format via unsigned path on digits.
-		if minor == math.MinInt64 {
-			// -9223372036854775808 → integer part and fraction from absolute digits.
-			const abs = "9223372036854775808"
-			return "-" + abs[:len(abs)-scale] + "." + abs[len(abs)-scale:]
-		}
 		minor = -minor
 	}
 	whole := minor / 100
@@ -131,34 +153,6 @@ func (m Money) Neg() (Money, error) {
 		return Money{}, err
 	}
 	return Money{minor: neg, currency: m.currency}, nil
-}
-
-type moneyJSON struct {
-	Amount   string `json:"amount"`
-	Currency string `json:"currency"`
-}
-
-func (m Money) MarshalJSON() ([]byte, error) {
-	if !m.valid() {
-		return nil, ErrUninitialized
-	}
-	return json.Marshal(moneyJSON{
-		Amount:   m.AmountString(),
-		Currency: m.currency,
-	})
-}
-
-func (m *Money) UnmarshalJSON(b []byte) error {
-	var raw moneyJSON
-	if err := json.Unmarshal(b, &raw); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidAmount, err)
-	}
-	parsed, err := Parse(raw.Amount, raw.Currency)
-	if err != nil {
-		return err
-	}
-	*m = parsed
-	return nil
 }
 
 func addMinor(a, b int64) (int64, error) {
