@@ -29,7 +29,7 @@ Overflow em parsing, soma, subtração e negação retorna `money.ErrOverflow`.
 | --- | --- |
 | API / JSON | `{"amount":"25.00","currency":"BRL"}` (strings) |
 | Domínio | `minor int64` + `currency string` |
-| Persistência (planejada) | `BIGINT` (minor) + `CHAR(3)`/`TEXT` (currency) |
+| Persistência | `BIGINT` (minor) + `CHAR(3)` (currency) |
 
 ### Entrada externa (`Parse`)
 
@@ -48,7 +48,7 @@ Não há normalização de formas equivalentes. O amount que entra no hash de id
 
 - `Parse` / `UnmarshalJSON` (entrada externa): negativos são inválidos.
 - Uso interno (`FromMinor`, `Sub`, `Neg`): negativos são permitidos para diferenças e cálculos.
-- Saldo de carteira não-negativo é responsabilidade do agregado `Wallet` (e, depois, das constraints do banco).
+- Saldo de carteira não-negativo é responsabilidade do agregado `Wallet` e das constraints do banco.
 
 ### Erros
 
@@ -98,22 +98,68 @@ Movimentos exigem amount **> 0** e a mesma moeda da carteira. Débito com saldo 
 
 `version` inicia em `1` e incrementa **somente** quando o saldo muda (`Credit`/`Debit`).
 
-### Concorrência (planejada na persistência)
+### Organização de pacotes
 
-No domínio, a versão acompanha mudanças de saldo. Entre processos, a aplicação usará:
+Wallet e `LedgerEntry` ficam no **mesmo** pacote `internal/domain/wallet`. O ledger não é agregado independente; nasce só com mudança de saldo. Na infra há duas tabelas e dois repos (`wallet_repo`, `ledger_repo`) no pacote `internal/infra/postgres`.
 
-1. `SELECT … FOR UPDATE` na linha da carteira dentro da TX SQL (lock por carteira, nunca global)
-2. persistência atômica de saldo + ledger (+ demais registros da operação)
-3. constraints no banco: unicidade `(player_id, currency)`, unicidade `(wallet_id, transaction_id)`, saldo ≥ 0, ledger append-only (sem update/delete)
+### Concorrência
 
-Assim evitamos lost updates e saldo negativo mesmo com várias instâncias.
+O README (§8) permite pessimista, otimista com retry, update atômico condicionado ou combinação. Coordenação **por carteira**; lock global é proibido.
 
-### Persistência (planejada)
+#### Pessimista vs otimista (resumo)
+
+- **Pessimista:** `SELECT … FOR UPDATE` bloqueia a linha da carteira antes de alterar; outros writers na mesma wallet esperam. Simples e adequado à disputa 100 vs 2×80.
+- **Otimista:** lê sem lock e grava com `WHERE version = $antiga`; se 0 rows, houve conflito → retry. Melhor quando conflito é raro; sob contenção na mesma wallet gera muitos retries.
+- **Update atômico:** `UPDATE … WHERE balance_minor >= $amount` como rede de segurança SQL — não substitui o agregado de domínio.
+
+#### Escolha adotada
+
+**Locking pessimista por carteira** (`SELECT … FROM wallets WHERE id = $1 FOR UPDATE`):
+
+1. Lock apenas na linha da wallet alvo (carteiras distintas seguem em paralelo)
+2. TX curta: lock → domínio (`Credit`/`Debit`) → `UPDATE` wallet + `INSERT` ledger → `COMMIT`
+3. Campo `version`: incrementado no domínio a cada mudança de saldo; persistido para auditoria. O mecanismo primário anti lost-update entre writers é o `FOR UPDATE`, não retry otimista
+4. Constraints no DB como fonte da verdade adicional (abaixo)
+
+Não usamos motor de retry otimista nem fila/lock global por processo.
+
+#### Atomicidade (obrigatório — não esquecer)
+
+```text
+BEGIN
+  -- FOR UPDATE na wallet quando for alterar
+  -- INSERT/UPDATE wallet
+  -- INSERT ledger (sempre junto com mudança de saldo)
+  -- TODO(futuro): INSERT wager_transaction / inbox / outbox na MESMA TX
+COMMIT
+```
+
+Wallet + ledger da mesma operação financeira **nunca** em commits separados. Quando existirem inbox/outbox/wager, entram neste mesmo `BEGIN…COMMIT`.
+
+#### Constraints (fonte da verdade no DB)
+
+| Constraint | Onde | Por quê |
+| --- | --- | --- |
+| `UNIQUE (player_id, currency)` | `wallets` | uma carteira por jogador+moeda |
+| `UNIQUE (wallet_id, transaction_id)` | `wallet_ledger_entries` | um lançamento por transação na carteira |
+| `CHECK (balance_minor >= 0)` | `wallets` | impede saldo negativo no banco |
+| Ledger append-only | repo | só `INSERT`; sem `UPDATE`/`DELETE` de lançamentos |
+
+### Persistência
 
 | Tabela | Papel |
 | --- | --- |
-| `wallets` | estado atual (saldo em `BIGINT` minor + currency, version) |
-| `wallet_ledger_entries` | lançamentos imutáveis |
+| `wallets` | estado atual (`balance_minor` BIGINT + currency, version) |
+| `wallet_ledger_entries` | lançamentos imutáveis (append-only) |
+
+Migrations em `migrations/`. Repos em `internal/infra/postgres` (pgx, SQL explícito). Ambiente local: `docker compose up -d` (somente Postgres nesta fase).
+
+Aplicar migrations (exemplo):
+
+```sh
+docker compose up -d
+psql "$DATABASE_URL" -f migrations/000001_wallets_ledger.up.sql
+```
 
 ### Erros
 
@@ -122,3 +168,4 @@ Assim evitamos lost updates e saldo negativo mesmo com várias instâncias.
 - `ErrInvalidMovement` / `ErrInvalidLedger`
 - `ErrUninitialized`
 - reutiliza `money.ErrCurrencyMismatch` quando a moeda do movimento diverge
+- infra: `postgres.ErrConflict`, `postgres.ErrNotFound`
