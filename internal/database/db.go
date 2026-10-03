@@ -62,6 +62,7 @@ func (db *DB) WithinTx(ctx context.Context, fn func(q gateway.Querier) error) er
 var (
 	_ gateway.TxRunner    = (*DB)(nil)
 	_ gateway.ReadQuerier = (*DB)(nil)
+	_ gateway.DB          = (*DB)(nil)
 )
 
 func isUniqueViolation(err error) bool {

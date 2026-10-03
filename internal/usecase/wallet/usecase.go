@@ -33,10 +33,7 @@ type UseCase struct {
 }
 
 func NewUseCase(
-	db interface {
-		gateway.TxRunner
-		gateway.ReadQuerier
-	},
+	db gateway.DB,
 	wallets gateway.WalletRepository,
 	ledgers gateway.LedgerRepository,
 	ids idgen.Generator,

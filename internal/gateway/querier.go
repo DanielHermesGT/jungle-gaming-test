@@ -23,3 +23,9 @@ type TxRunner interface {
 type ReadQuerier interface {
 	Querier() Querier
 }
+
+// DB combines transactional and non-transactional access for use cases.
+type DB interface {
+	TxRunner
+	ReadQuerier
+}

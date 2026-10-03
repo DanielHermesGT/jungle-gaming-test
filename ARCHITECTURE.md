@@ -105,11 +105,14 @@ Inspirada em clean architecture (referência interna `pratico-ms-vEDA`), adaptad
 ```text
 internal/
   domain/       # Money, Wallet, LedgerEntry (mantido; não "entity" — Money é VO)
-  gateway/      # ports (interfaces de repositório + Querier/TxRunner)
-  database/     # adapters Postgres (pgx, SQL explícito)
+  gateway/      # ports (interfaces de repositório + Querier/TxRunner/DB)
+  database/     # adapters Postgres (pgx, SQL explícito) + fx.Module
   usecase/      # um pacote por módulo (ex.: wallet/)
+  web/          # HTTP handlers + router (net/http ServeMux)
+  config/       # env (HTTP_ADDR, DATABASE_URL)
+  app/          # composição Fx dos módulos
 pkg/            # idgen, clock
-cmd/            # entrypoints (HTTP futuro)
+cmd/server/     # fx.New(app.Module).Run()
 ```
 
 Wallet e `LedgerEntry` ficam no **mesmo** pacote `internal/domain/wallet`. O ledger não é agregado independente; nasce só com mudança de saldo. Persistência: duas tabelas e dois repos em `internal/database`.
@@ -185,7 +188,7 @@ psql "$DATABASE_URL" -f migrations/000001_wallets_ledger.up.sql
 
 ## Application — use cases de carteira
 
-Módulo `internal/usecase/wallet` — um `UseCase` com métodos (sem HTTP ainda):
+Módulo `internal/usecase/wallet` — um `UseCase` com métodos:
 
 | Método | Papel |
 | --- | --- |
@@ -195,3 +198,28 @@ Módulo `internal/usecase/wallet` — um `UseCase` com métodos (sem HTTP ainda)
 | `Reconcile` | saldo armazenado vs ΣCREDIT−ΣDEBIT; não altera saldo |
 
 `Open` com saldo positivo ainda **não** persiste `WagerTransaction OPENING` nem outbox — `TODO(futuro)`. Wallet + ledger da abertura já vão no mesmo `Commit`.
+
+## HTTP + Uber Fx
+
+Composição em `internal/app` via `fx.Module`s: `config` → `database` → `usecase/wallet` → `web`.
+
+`fx.Lifecycle`:
+- `OnStart`: `http.Server.ListenAndServe` em goroutine
+- `OnStop`: `Shutdown` do HTTP + `DB.Close`
+
+Rotas (`net/http` ServeMux):
+
+| Método | Path |
+| --- | --- |
+| `POST` | `/wallets` |
+| `GET` | `/wallets/{walletId}` |
+| `GET` | `/wallets/{walletId}/ledger` |
+| `POST` | `/wallets/{walletId}/reconciliation` |
+| `GET` | `/health/live` |
+| `GET` | `/health/ready` (ping Postgres; SQS TODO) |
+
+Erros de use case → HTTP: `400` invalid, `404` not found, `409` conflict, `500` demais.
+
+### Auth (próximo passo)
+
+**Ainda não implementada.** README §2 exige IdP (Keycloak) e restringe `/wallets*` ao serviço interno — eliminatório. Próxima fatia: JWT via JWKS + role/claim interna; health permanece público.

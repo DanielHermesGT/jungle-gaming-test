@@ -19,8 +19,6 @@ func NewLedgerRepo() *LedgerRepo {
 	return &LedgerRepo{}
 }
 
-var _ gateway.LedgerRepository = (*LedgerRepo)(nil)
-
 func (r *LedgerRepo) Insert(ctx context.Context, q gateway.Querier, entry wallet.LedgerEntry) error {
 	const sql = `
 INSERT INTO wallet_ledger_entries (

@@ -1,4 +1,11 @@
 package main
 
-// TODO(futuro): compor Fx (config, database, use cases, HTTP, workers) e subir o servidor.
-func main() {}
+import (
+	"go.uber.org/fx"
+
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/app"
+)
+
+func main() {
+	fx.New(app.Module).Run()
+}
