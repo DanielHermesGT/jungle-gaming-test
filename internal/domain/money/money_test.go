@@ -28,7 +28,7 @@ func TestParseOK(t *testing.T) {
 		tc := tc
 		t.Run(tc.amount+"_"+tc.currency, func(t *testing.T) {
 			t.Parallel() //permite rodar os testes em paralelo
-			m, err := money.Parse(tc.amount, tc.currency)
+			m, err := money.Parse(tc.currency, tc.amount)
 			if err != nil {
 				t.Fatalf("Parse: %v", err)
 			}
@@ -73,7 +73,7 @@ func TestParseInvalid(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := money.Parse(tc.amount, tc.currency)
+			_, err := money.Parse(tc.currency, tc.amount)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err=%v want %v", err, tc.want)
 			}
@@ -84,11 +84,11 @@ func TestParseInvalid(t *testing.T) {
 func TestArithmetic(t *testing.T) {
 	t.Parallel()
 
-	a, err := money.Parse("25.00", "BRL")
+	a, err := money.Parse("BRL", "25.00")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := money.Parse("10.50", "BRL")
+	b, err := money.Parse("BRL", "10.50")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestOverflow(t *testing.T) {
 	}
 
 	// Parse overflow: whole part too large for *100
-	_, err = money.Parse("92233720368547759.00", "BRL")
+	_, err = money.Parse("BRL", "92233720368547759.00")
 	if !errors.Is(err, money.ErrOverflow) {
 		t.Fatalf("Parse overflow err=%v", err)
 	}
@@ -232,9 +232,9 @@ func TestUninitialized(t *testing.T) {
 
 func mustParse(t *testing.T, amount, currency string) money.Money {
 	t.Helper()
-	m, err := money.Parse(amount, currency)
+	m, err := money.Parse(currency, amount)
 	if err != nil {
-		t.Fatalf("Parse(%q,%q): %v", amount, currency, err)
+		t.Fatalf("Parse(%q,%q): %v", currency, amount, err)
 	}
 	return m
 }

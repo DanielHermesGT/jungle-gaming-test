@@ -159,7 +159,7 @@ func TestGetByIDForUpdateAndUpdate(t *testing.T) {
 
 func mustParse(t *testing.T, amount, currency string) money.Money {
 	t.Helper()
-	m, err := money.Parse(amount, currency)
+	m, err := money.Parse(currency, amount)
 	if err != nil {
 		t.Fatal(err)
 	}

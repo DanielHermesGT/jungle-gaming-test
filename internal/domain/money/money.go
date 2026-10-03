@@ -10,7 +10,7 @@ const scale = 2
 
 // Money is an immutable monetary value in minor units (fixed scale of 2).
 type Money struct {
-	minor    int64
+	minor    int64 //valor em unidade minima (centavos)
 	currency string
 }
 
@@ -34,7 +34,7 @@ func (m *Money) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidAmount, err)
 	}
-	parsed, err := Parse(raw.Amount, raw.Currency)
+	parsed, err := Parse(raw.Currency, raw.Amount)
 	if err != nil {
 		return err
 	}

@@ -257,9 +257,9 @@ func TestUninitializedWallet(t *testing.T) {
 
 func mustParse(t *testing.T, amount, currency string) money.Money {
 	t.Helper()
-	m, err := money.Parse(amount, currency)
+	m, err := money.Parse(currency, amount)
 	if err != nil {
-		t.Fatalf("Parse(%q,%q): %v", amount, currency, err)
+		t.Fatalf("Parse(%q,%q): %v", currency, amount, err)
 	}
 	return m
 }
