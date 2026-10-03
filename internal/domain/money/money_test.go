@@ -10,7 +10,7 @@ import (
 )
 
 func TestParseOK(t *testing.T) {
-	t.Parallel()
+	t.Parallel() //permite rodar os testes em paralelo, evitando dependências entre eles
 
 	cases := []struct {
 		amount   string
@@ -27,7 +27,7 @@ func TestParseOK(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.amount+"_"+tc.currency, func(t *testing.T) {
-			t.Parallel()
+			t.Parallel() //permite rodar os testes em paralelo
 			m, err := money.Parse(tc.amount, tc.currency)
 			if err != nil {
 				t.Fatalf("Parse: %v", err)

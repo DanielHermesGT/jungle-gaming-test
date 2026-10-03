@@ -42,7 +42,8 @@ func (m *Money) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// FromMinor builds Money from minor units. Negative values are allowed for internal use.
+// FromMinor cria Money a partir de unidades mínimas (centavos).
+// Valores negativos são permitidos para uso interno (diferenças e cálculos).
 func FromMinor(minor int64, currency string) (Money, error) {
 	if err := validateCurrency(currency); err != nil {
 		return Money{}, err
@@ -67,7 +68,7 @@ func (m Money) Currency() string {
 	return m.currency
 }
 
-// AmountString formats the amount with exactly two decimal places.
+// AmountString formata o valor com exatamente duas casas decimais (ex.: "25.00").
 func (m Money) AmountString() string {
 	if !m.valid() {
 		return ""
@@ -95,6 +96,8 @@ func (m Money) Equal(other Money) bool {
 	return m.valid() && other.valid() && m.currency == other.currency && m.minor == other.minor
 }
 
+// Cmp compara dois Money da mesma moeda.
+// Retorna -1 se m < other, 0 se iguais, 1 se m > other.
 func (m Money) Cmp(other Money) (int, error) {
 	if !m.valid() || !other.valid() {
 		return 0, ErrUninitialized
