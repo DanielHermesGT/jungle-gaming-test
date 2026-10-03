@@ -1,0 +1,167 @@
+package postgres_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/money"
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wallet"
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/infra/postgres"
+)
+
+func TestInsertWalletAndLedgerSameTx(t *testing.T) {
+	db := postgres.OpenTestDB(t)
+	ctx := context.Background()
+	wallets := postgres.NewWalletRepo()
+	ledgers := postgres.NewLedgerRepo()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+
+	opened, err := wallet.Open(wallet.OpenParams{
+		WalletID:       "wallet-1",
+		PlayerID:       "player-1",
+		InitialBalance: mustParse(t, "100.00", "BRL"),
+		OpeningTxID:    "tx-open",
+		LedgerEntryID:  "ledger-open",
+		Now:            now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Atomicidade: wallet + ledger no mesmo Commit.
+	// TODO(futuro): incluir wager/inbox/outbox nesta mesma Tx.
+	err = db.WithinTx(ctx, func(tx pgx.Tx) error {
+		if err := wallets.Insert(ctx, tx, opened.Wallet); err != nil {
+			return err
+		}
+		return ledgers.Insert(ctx, tx, *opened.Ledger)
+	})
+	if err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+
+	got, err := wallets.GetByID(ctx, db.Pool, "wallet-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Balance().AmountString() != "100.00" || got.Version() != 1 {
+		t.Fatalf("wallet=%s v=%d", got.Balance().AmountString(), got.Version())
+	}
+
+	entries, err := ledgers.ListByWalletID(ctx, db.Pool, "wallet-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Direction() != wallet.DirectionCredit {
+		t.Fatalf("ledger=%+v", entries)
+	}
+}
+
+func TestInsertWalletConflictSamePlayerCurrency(t *testing.T) {
+	db := postgres.OpenTestDB(t)
+	ctx := context.Background()
+	wallets := postgres.NewWalletRepo()
+	now := time.Unix(1, 0).UTC()
+
+	first, err := wallet.Open(wallet.OpenParams{
+		WalletID:       "wallet-a",
+		PlayerID:       "player-x",
+		InitialBalance: mustParse(t, "0.00", "BRL"),
+		Now:            now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wallets.Insert(ctx, db.Pool, first.Wallet); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := wallet.Open(wallet.OpenParams{
+		WalletID:       "wallet-b",
+		PlayerID:       "player-x",
+		InitialBalance: mustParse(t, "0.00", "BRL"),
+		Now:            now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = wallets.Insert(ctx, db.Pool, second.Wallet)
+	if !errors.Is(err, postgres.ErrConflict) {
+		t.Fatalf("err=%v want conflict", err)
+	}
+}
+
+func TestGetByIDForUpdateAndUpdate(t *testing.T) {
+	db := postgres.OpenTestDB(t)
+	ctx := context.Background()
+	wallets := postgres.NewWalletRepo()
+	ledgers := postgres.NewLedgerRepo()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+
+	opened, err := wallet.Open(wallet.OpenParams{
+		WalletID:       "wallet-2",
+		PlayerID:       "player-2",
+		InitialBalance: mustParse(t, "100.00", "BRL"),
+		OpeningTxID:    "tx-open-2",
+		LedgerEntryID:  "ledger-open-2",
+		Now:            now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.WithinTx(ctx, func(tx pgx.Tx) error {
+		if err := wallets.Insert(ctx, tx, opened.Wallet); err != nil {
+			return err
+		}
+		return ledgers.Insert(ctx, tx, *opened.Ledger)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = db.WithinTx(ctx, func(tx pgx.Tx) error {
+		locked, err := wallets.GetByIDForUpdate(ctx, tx, "wallet-2")
+		if err != nil {
+			return err
+		}
+		moved, err := locked.Debit("ledger-bet", "tx-bet", mustParse(t, "30.00", "BRL"), now.Add(time.Minute))
+		if err != nil {
+			return err
+		}
+		if err := wallets.Update(ctx, tx, moved.Wallet); err != nil {
+			return err
+		}
+		return ledgers.Insert(ctx, tx, moved.Ledger)
+	})
+	if err != nil {
+		t.Fatalf("debit tx: %v", err)
+	}
+
+	got, err := wallets.GetByID(ctx, db.Pool, "wallet-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Balance().AmountString() != "70.00" || got.Version() != 2 {
+		t.Fatalf("balance=%s version=%d", got.Balance().AmountString(), got.Version())
+	}
+	entries, err := ledgers.ListByWalletID(ctx, db.Pool, "wallet-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries=%d", len(entries))
+	}
+}
+
+func mustParse(t *testing.T, amount, currency string) money.Money {
+	t.Helper()
+	m, err := money.Parse(amount, currency)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
