@@ -17,6 +17,7 @@ func NewWalletRepo() *WalletRepo {
 	return &WalletRepo{}
 }
 
+// checagem em tempo de compilação para garantir que a interface é implementada corretamente
 var _ gateway.WalletRepository = (*WalletRepo)(nil)
 
 func (r *WalletRepo) Insert(ctx context.Context, q gateway.Querier, w wallet.Wallet) error {

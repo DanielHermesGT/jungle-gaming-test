@@ -46,6 +46,9 @@ INSERT INTO wallet_ledger_entries (
 	return nil
 }
 
+// ListByWalletID devolve TODOS os lançamentos da carteira (sem LIMIT).
+// Uso: reconciliação e cenários internos que precisam do ledger completo.
+// Não use na API HTTP de listagem — preferir ListByWalletIDPage.
 func (r *LedgerRepo) ListByWalletID(ctx context.Context, q gateway.Querier, walletID string) ([]wallet.LedgerEntry, error) {
 	const sql = `
 SELECT id, wallet_id, transaction_id, direction,
@@ -57,8 +60,9 @@ ORDER BY created_at ASC, id ASC`
 	return r.scanList(ctx, q, sql, walletID)
 }
 
-// ListByWalletIDPage returns up to limit entries after an opaque keyset cursor.
-// Empty cursorID means the first page.
+// ListByWalletIDPage devolve uma PÁGINA (até limit) para a API GET .../ledger.
+// cursorID vazio = primeira página; com cursor = continua depois de (createdAt, id).
+// O cliente guarda o nextCursor da resposta e manda de volta na próxima request.
 func (r *LedgerRepo) ListByWalletIDPage(
 	ctx context.Context,
 	q gateway.Querier,

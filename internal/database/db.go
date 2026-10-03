@@ -59,6 +59,7 @@ func (db *DB) WithinTx(ctx context.Context, fn func(q gateway.Querier) error) er
 	return nil
 }
 
+// checagem em tempo de compilação para garantir que a interface é implementada corretamente
 var (
 	_ gateway.TxRunner    = (*DB)(nil)
 	_ gateway.ReadQuerier = (*DB)(nil)
