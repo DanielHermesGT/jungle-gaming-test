@@ -126,6 +126,40 @@ func TestRequireProvider(t *testing.T) {
 	}
 }
 
+func TestProtectProviderPath(t *testing.T) {
+	mw := auth.NewMiddleware(stubVerifier{
+		principal: auth.Principal{Subject: "p", ProviderID: "provider-a"},
+	}, auth.RoleWalletInternal)
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /providers/{providerId}/x", mw.ProtectProviderPath("providerId", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+
+	okReq := httptest.NewRequest(http.MethodGet, "/providers/provider-a/x", nil)
+	okReq.Header.Set("Authorization", "Bearer ok")
+	okRec := httptest.NewRecorder()
+	mux.ServeHTTP(okRec, okReq)
+	if okRec.Code != http.StatusOK {
+		t.Fatalf("match status=%d", okRec.Code)
+	}
+
+	badReq := httptest.NewRequest(http.MethodGet, "/providers/provider-b/x", nil)
+	badReq.Header.Set("Authorization", "Bearer ok")
+	badRec := httptest.NewRecorder()
+	mux.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusForbidden {
+		t.Fatalf("mismatch status=%d", badRec.Code)
+	}
+
+	unauthReq := httptest.NewRequest(http.MethodGet, "/providers/provider-a/x", nil)
+	unauthRec := httptest.NewRecorder()
+	mux.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth status=%d", unauthRec.Code)
+	}
+}
+
 func assertCode(t *testing.T, rec *httptest.ResponseRecorder, want string) {
 	t.Helper()
 	var body map[string]string

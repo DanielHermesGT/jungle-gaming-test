@@ -15,6 +15,7 @@ import (
 var Module = fx.Module("web",
 	fx.Provide(
 		NewWalletHandler,
+		NewWagerHandler,
 		NewHealthHandler,
 		NewRouter,
 		NewHTTPServer,

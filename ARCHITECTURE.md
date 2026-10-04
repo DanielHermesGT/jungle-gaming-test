@@ -204,7 +204,7 @@ Módulo `internal/usecase/wallet` — um `UseCase` com métodos:
 
 ## HTTP + Uber Fx
 
-Composição em `internal/app` via `fx.Module`s: `config` → `auth` → `database` → `usecase/wallet` → `web`.
+Composição em `internal/app` via `fx.Module`s: `config` → `auth` → `database` → `usecase/wallet` + `usecase/wager` → `web`.
 
 `fx.Lifecycle`:
 - `OnStart`: `http.Server.ListenAndServe` em goroutine
@@ -218,11 +218,15 @@ Rotas (`net/http` ServeMux):
 | `GET` | `/wallets/{walletId}` | JWT + role `wallet-internal` |
 | `GET` | `/wallets/{walletId}/ledger` | JWT + role `wallet-internal` |
 | `POST` | `/wallets/{walletId}/reconciliation` | JWT + role `wallet-internal` |
+| `POST` | `/wagering/transactions` | JWT + claim `provider_id` (handler: body == claim) |
+| `GET` | `/wagering/transactions/{transactionId}` | JWT + claim; tx de outro provedor → **403** |
+| `GET` | `/providers/{providerId}/wagering/transactions/{externalTransactionId}` | `ProtectProviderPath` (claim == path) |
 | `GET` | `/health/live` | público |
 | `GET` | `/health/ready` | público (ping Postgres; SQS TODO) |
 
 Erros de use case → HTTP: `400` invalid, `404` not found, `409` conflict, `500` demais.  
-Auth → `401` unauthorized, `403` forbidden.
+Auth → `401` unauthorized, `403` forbidden.  
+POST wagering: `REJECTED` / `PENDING_REFERENCE` / replay → **200** com `status` (e `failureCode` se houver) no body.
 
 ## WagerTransaction
 
@@ -300,9 +304,16 @@ Port `gateway.WagerRepository` / impl `database.WagerRepo` (Insert/Update/lookup
 
 `CanonicalPayloadHash`: SHA-256 hex de JSON com chaves ordenadas. Campos: `providerId`, `externalTransactionId`, `playerId`, `walletId`, `roundId`, `gameId`, `kind`, `amount`, `currency`, e `referenceExternalTransactionId` quando presente. Exclui `Idempotency-Key` e metadados de transporte.
 
-#### Ainda fora desta fase
+#### HTTP wagering
 
-HTTP `/wagering*`, SQS, inbox, outbox (publisher e registros na TX), worker periódico de `PENDING_REFERENCE`.
+Handler em `internal/web/wager_handler.go` chama `CanonicalPayloadHash` + `Process` / `Get` / `GetByExternal`.  
+Header `Idempotency-Key` obrigatório no POST (não é substituído pelo servidor).
+
+Auth: `Authenticate` nas rotas genéricas; `ProtectProviderPath` na rota com `{providerId}` no path (reusa `RequireProvider`). Isolamento restante (body/tx) no handler.
+
+#### Ainda fora
+
+SQS, inbox, outbox (publisher e registros na TX), worker periódico de `PENDING_REFERENCE`.
 
 ## Autenticação e autorização
 
@@ -317,7 +328,7 @@ Validação: `github.com/coreos/go-oidc/v3` — discovery do issuer + JWKS, veri
 | Ator | Client | Claims / roles | Acesso |
 | --- | --- | --- | --- |
 | Serviço interno | `jungle-internal` | realm role `wallet-internal`; `aud` inclui `jungle-api` | `/wallets*` |
-| Provedor | `provider-a` | claim `provider_id`; sem role interna | futuras rotas wagering (isolamento por `providerId`); **403** em wallet |
+| Provedor | `provider-a` | claim `provider_id`; sem role interna | `/wagering*` e `/providers/{providerId}/wagering/*`; **403** em wallet |
 | Anônimo | — | — | só health |
 
 `Principal` no `context` (`subject`, `roles`, `providerId`) — uso em logs e authz futura (`RequireProvider`). Domínio permanece sem dependência de auth.

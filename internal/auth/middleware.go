@@ -58,7 +58,6 @@ func (m *Middleware) RequireInternal(next http.Handler) http.Handler {
 }
 
 // RequireProvider ensures the principal's providerId matches the expected value.
-// Ready for future wagering routes (README §2 provider isolation).
 func (m *Middleware) RequireProvider(providerID string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, ok := PrincipalFromContext(r.Context())
@@ -68,6 +67,15 @@ func (m *Middleware) RequireProvider(providerID string, next http.Handler) http.
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// ProtectProviderPath autentica e exige que PathValue(pathKey) == Principal.ProviderID.
+// Uso: GET /providers/{providerId}/wagering/...
+func (m *Middleware) ProtectProviderPath(pathKey string, next http.Handler) http.Handler {
+	return m.Authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerID := r.PathValue(pathKey)
+		m.RequireProvider(providerID, next).ServeHTTP(w, r)
+	}))
 }
 
 func bearerToken(header string) (string, bool) {

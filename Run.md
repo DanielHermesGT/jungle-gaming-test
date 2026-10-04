@@ -1,7 +1,7 @@
 # Como rodar o projeto
 
 Guia prático: Postgres + Keycloak + API HTTP (Uber Fx).  
-SQS / outbox / wagering HTTP ainda não estão nesta fase.
+SQS / outbox ainda não estão nesta fase; wagering HTTP já está.
 
 ## Pré-requisitos
 
@@ -136,10 +136,10 @@ No JSON decodificado, confira:
 - `"aud"` contém `jungle-api`
 - `"realm_access": { "roles": [ ..., "wallet-internal", ... ] }`
 
-| Client | Secret | `/wallets*` |
-| --- | --- | --- |
-| `jungle-internal` | `jungle-internal-secret` | permitido (com role) |
-| `provider-a` | `provider-a-secret` | **403** |
+| Client | Secret | `/wallets*` | `/wagering*` |
+| --- | --- | --- | --- |
+| `jungle-internal` | `jungle-internal-secret` | permitido (com role) | **403** (sem `provider_id`) |
+| `provider-a` | `provider-a-secret` | **403** | permitido (claim `provider_id`) |
 
 ### 4.2 Chamadas
 
@@ -172,7 +172,48 @@ Sem token → `401`. Token de `provider-a` → `403` em `/wallets*`.
 
 No log da API, tabela faltando aparece como `relation "wallets" does not exist`.
 
-### 4.3 Se o decode do token NÃO tiver `wallet-internal`
+### 4.3 Wagering (token do provedor)
+
+Abra a carteira com `$TOKEN` interno (passo 4.2) e guarde o `id` da wallet. Depois:
+
+```sh
+PROVIDER_TOKEN=$(curl -s -X POST 'http://localhost:8081/realms/jungle/protocol/openid-connect/token' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials' \
+  -d 'client_id=provider-a' \
+  -d 'client_secret=provider-a-secret' | jq -r .access_token)
+
+# confira claim provider_id == provider-a no decode do JWT
+```
+
+```sh
+# substitua WALLET_ID e PLAYER_ID pelos valores da abertura
+curl -s -X POST localhost:8080/wagering/transactions \
+  -H "Authorization: Bearer $PROVIDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: provider-a:transaction-123' \
+  -d '{
+    "providerId":"provider-a",
+    "externalTransactionId":"transaction-123",
+    "playerId":"PLAYER_ID",
+    "walletId":"WALLET_ID",
+    "roundId":"round-987",
+    "gameId":"fortune-chimp",
+    "kind":"BET",
+    "money":{"amount":"25.00","currency":"BRL"}
+  }'
+
+curl -s localhost:8080/wagering/transactions/TRANSACTION_ID \
+  -H "Authorization: Bearer $PROVIDER_TOKEN"
+
+curl -s localhost:8080/providers/provider-a/wagering/transactions/transaction-123 \
+  -H "Authorization: Bearer $PROVIDER_TOKEN"
+```
+
+`Idempotency-Key` é obrigatório no POST. Mesmo key+body → replay (`idempotentReplay: true`).  
+`REJECTED` / `PENDING_REFERENCE` também respondem **200** com `status` no JSON.
+
+### 4.4 Se o decode do token NÃO tiver `wallet-internal`
 
 O realm antigo no container não pega mudança do JSON sozinho. Recrie o Keycloak:
 
@@ -198,7 +239,7 @@ set -a && source .env && set +a   # se for rodar integração com Postgres
 go test ./internal/domain/... ./internal/auth/... ./internal/web/... ./internal/app/... -race
 
 # integração Postgres
-go test ./internal/database/ ./internal/usecase/wallet/ -v -count=1
+go test ./internal/database/ ./internal/usecase/wallet/ ./internal/usecase/wager/ -v -count=1
 
 go test ./... -race
 go vet ./...
@@ -206,7 +247,7 @@ go vet ./...
 
 ## O que ainda não roda
 
-- LocalStack / filas SQS / outbox / `POST /wagering/transactions`
-- Authz por `providerId` nas rotas de wagering (middleware `RequireProvider` já existe)
+- LocalStack / filas SQS / inbox / outbox
+- Worker de `PENDING_REFERENCE` (use case `ResumePendingReference` já existe)
 
 Decisões: `ARCHITECTURE.md`. Enunciado: `README.md`.

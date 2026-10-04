@@ -12,6 +12,11 @@ func NewWalletHandlerForTest(uc walletService) *WalletHandler {
 	return &WalletHandler{uc: uc}
 }
 
+// NewWagerHandlerForTest builds a wager handler with a test double.
+func NewWagerHandlerForTest(uc wagerService) *WagerHandler {
+	return &WagerHandler{uc: uc}
+}
+
 // NewHealthHandlerForTest returns a health handler without a live DB.
 // Ready is not exercised in unit tests that use this helper.
 func NewHealthHandlerForTest() *HealthHandler {
