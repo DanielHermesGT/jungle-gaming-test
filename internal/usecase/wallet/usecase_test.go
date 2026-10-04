@@ -9,6 +9,7 @@ import (
 
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/database"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/money"
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wager"
 	domainwallet "github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wallet"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/gateway"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/usecase"
@@ -16,7 +17,7 @@ import (
 )
 
 func TestOpenPositiveAndZero(t *testing.T) {
-	uc, _ := newUseCase(t)
+	uc, db := newUseCase(t)
 	ctx := context.Background()
 
 	pos, err := uc.Open(ctx, usecasewallet.OpenInput{
@@ -46,6 +47,14 @@ func TestOpenPositiveAndZero(t *testing.T) {
 		t.Fatalf("ledger=%+v", page.Entries)
 	}
 
+	opening, err := database.NewWagerRepo().GetByID(ctx, db.Pool, page.Entries[0].TransactionID)
+	if err != nil {
+		t.Fatalf("opening wager: %v", err)
+	}
+	if opening.Kind() != wager.KindOpening || opening.Status() != wager.StatusProcessed {
+		t.Fatalf("opening=%s %s", opening.Kind(), opening.Status())
+	}
+
 	zero, err := uc.Open(ctx, usecasewallet.OpenInput{
 		PlayerID:       "player-zero",
 		InitialBalance: mustParse(t, "0.00", "BRL"),
@@ -59,6 +68,13 @@ func TestOpenPositiveAndZero(t *testing.T) {
 	}
 	if len(empty.Entries) != 0 {
 		t.Fatalf("want 0 entries, got %d", len(empty.Entries))
+	}
+	var n int
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM wager_transactions WHERE wallet_id = $1`, zero.ID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("zero open must not create OPENING, got %d", n)
 	}
 }
 
@@ -89,7 +105,7 @@ func TestListLedgerPagesAndReconcile(t *testing.T) {
 	ctx := context.Background()
 	ids := &seqIDs{}
 	clk := fixedClock{at: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
-	uc := usecasewallet.NewUseCase(db, database.NewWalletRepo(), database.NewLedgerRepo(), ids, clk)
+	uc := usecasewallet.NewUseCase(db, database.NewWalletRepo(), database.NewLedgerRepo(), database.NewWagerRepo(), ids, clk)
 
 	opened, err := uc.Open(ctx, usecasewallet.OpenInput{
 		PlayerID:       "player-page",
@@ -176,6 +192,7 @@ func newUseCase(t *testing.T) (*usecasewallet.UseCase, *database.DB) {
 		db,
 		database.NewWalletRepo(),
 		database.NewLedgerRepo(),
+		database.NewWagerRepo(),
 		&seqIDs{},
 		fixedClock{at: time.Date(2026, 10, 3, 15, 0, 0, 0, time.UTC)},
 	)

@@ -82,7 +82,7 @@ Erros sentinela classificáveis com `errors.Is`:
 | `0.00` | Wallet com `version = 1`, sem lançamento de ledger |
 | `> 0` | Wallet com `version = 1` + um `CREDIT` de abertura no ledger (`balanceBefore = 0`) |
 
-A transação de negócio `OPENING` / eventos de outbox ficam na application layer; o domínio wallet apenas materializa saldo + ledger de abertura. O agregado `wager.Transaction` (OPENING) já existe em `internal/domain/wager` — a ligação `wallet.Open` → `NewOpening` + persistência é fatia futura.
+O domínio wallet materializa saldo + ledger de abertura. `wallet.Open` (use case) com saldo > 0 também persiste `wager.Transaction` OPENING (`PROCESSED`) na mesma TX. Eventos de outbox da abertura ainda são TODO.
 
 ### Ledger
 
@@ -147,11 +147,12 @@ BEGIN
   -- FOR UPDATE na wallet quando for alterar
   -- INSERT/UPDATE wallet
   -- INSERT ledger (sempre junto com mudança de saldo)
-  -- TODO(futuro): INSERT wager_transaction / inbox / outbox na MESMA TX
+  -- INSERT/UPDATE wager_transaction (OPENING / Process)
+  -- TODO(futuro): inbox / outbox na MESMA TX
 COMMIT
 ```
 
-Wallet + ledger da mesma operação financeira **nunca** em commits separados. Quando existirem inbox/outbox/wager, entram neste mesmo `BEGIN…COMMIT`.
+Wallet + ledger + wager da mesma operação financeira **nunca** em commits separados. Inbox/outbox entram neste mesmo `BEGIN…COMMIT` quando existirem.
 
 #### Constraints (fonte da verdade no DB)
 
@@ -199,7 +200,7 @@ Módulo `internal/usecase/wallet` — um `UseCase` com métodos:
 | `ListLedger` | ledger com cursor opaco `(created_at, id)` |
 | `Reconcile` | saldo armazenado vs ΣCREDIT−ΣDEBIT; não altera saldo |
 
-`Open` com saldo positivo ainda **não** persiste `WagerTransaction OPENING` nem outbox — `TODO(futuro)`. Wallet + ledger da abertura já vão no mesmo `Commit`.
+`Open` com saldo positivo persiste `WagerTransaction OPENING` na mesma TX que wallet + ledger. Outbox da abertura permanece `TODO(futuro)`.
 
 ## HTTP + Uber Fx
 
@@ -250,7 +251,7 @@ Auth → `401` unauthorized, `403` forbidden.
 | `BET` / `WIN` / `REFUND` / `ROLLBACK` | EXTERNAL | > 0 |
 | `LOSS` | EXTERNAL | `0.00` |
 
-Movimento de carteira (CREDIT/DEBIT) e resolução cruzada de referência ficam no use case futuro — o domínio só guarda estado e FSM.
+Movimento de carteira (CREDIT/DEBIT) e resolução cruzada de referência ficam no use case — o domínio só guarda estado e FSM.
 
 ### FSM
 
@@ -260,15 +261,16 @@ PENDING_REFERENCE → PROCESSED | REJECTED | FAILED
 PROCESSED | REJECTED | FAILED  (terminal → ErrTerminalStatus)
 ```
 
-Métodos (value receiver → novo estado): `AwaitReference`, `MarkProcessed`, `MarkRejected`, `MarkFailed`, `ResolveReference`.
+Métodos (value receiver → novo estado): `AwaitReference(until, now)`, `MarkProcessed`, `MarkRejected`, `MarkFailed`, `ResolveReference`.  
+`AwaitReference` grava `pendingReferenceUntil`; estados terminais zeram o campo.
 
 ### Failure codes (estáveis)
 
 `INSUFFICIENT_FUNDS`, `REVERSAL_INSUFFICIENT_FUNDS`, `REFERENCE_NOT_FOUND`, `REFERENCE_NOT_PROCESSED`, `DUPLICATE_REVERSAL`, `INVALID_AMOUNT`, `INVALID_KIND`, `INVALID_TRANSITION`.
 
-Códigos de conflito de idempotência ficam na application layer.
+Conflito de idempotência → `usecase.ErrConflict` (não é failure code na tx).
 
-### Persistência (`migrations/000002`)
+### Persistência (`migrations/000002` + `000003`)
 
 Tabela `wager_transactions` com CHECKs de origin/kind/status/amount e:
 
@@ -277,10 +279,30 @@ Tabela `wager_transactions` com CHECKs de origin/kind/status/amount e:
 - `UNIQUE (wallet_id) WHERE kind = OPENING` — um crédito inicial por carteira
 - `UNIQUE (provider_id, external_transaction_id)` e `UNIQUE (idempotency_key)` só em EXTERNAL
 - FK `wallet_id → wallets(id)`
+- `pending_reference_until` (000003) + índice parcial para worker futuro
 
-### Domínio vs app (ainda não nesta fase)
+Port `gateway.WagerRepository` / impl `database.WagerRepo` (Insert/Update/lookups/`ListPendingReferenceDue`).
 
-Fora do pacote `wager` (próximas fatias): use case de processamento, HTTP `/wagering`, SQS, inbox/outbox, repo/gateway, e `wallet.Open` persistindo OPENING na mesma TX.
+### Use case (`internal/usecase/wager`)
+
+`Process` é o fluxo compartilhado futuro de HTTP/SQS (ainda sem transporte):
+
+1. Idempotência por chave + `payloadHash` (replay ou conflito)
+2. Unicidade `(providerId, externalTransactionId)`
+3. `GetByIDForUpdate` na wallet
+4. BET debit / WIN credit / LOSS sem ledger / REFUND·ROLLBACK com ref
+5. Ref ausente → `PENDING_REFERENCE` com TTL **15m** (`PendingReferenceTTL`)
+6. Commit atômico: wager + saldo + ledger
+
+`ResumePendingReference` retoma ou expira (`REFERENCE_NOT_FOUND`) pendências — sem worker em background nesta fase.
+
+#### Hash canônico do payload
+
+`CanonicalPayloadHash`: SHA-256 hex de JSON com chaves ordenadas. Campos: `providerId`, `externalTransactionId`, `playerId`, `walletId`, `roundId`, `gameId`, `kind`, `amount`, `currency`, e `referenceExternalTransactionId` quando presente. Exclui `Idempotency-Key` e metadados de transporte.
+
+#### Ainda fora desta fase
+
+HTTP `/wagering*`, SQS, inbox, outbox (publisher e registros na TX), worker periódico de `PENDING_REFERENCE`.
 
 ## Autenticação e autorização
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/money"
+	domainwager "github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wager"
 	domainwallet "github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wallet"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/gateway"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/usecase"
@@ -28,6 +29,7 @@ type UseCase struct {
 	read    gateway.ReadQuerier
 	wallets gateway.WalletRepository
 	ledgers gateway.LedgerRepository
+	wagers  gateway.WagerRepository
 	ids     idgen.Generator
 	clock   clock.Clock
 }
@@ -36,6 +38,7 @@ func NewUseCase(
 	db gateway.DB,
 	wallets gateway.WalletRepository,
 	ledgers gateway.LedgerRepository,
+	wagers gateway.WagerRepository,
 	ids idgen.Generator,
 	clk clock.Clock,
 ) *UseCase {
@@ -44,6 +47,7 @@ func NewUseCase(
 		read:    db,
 		wallets: wallets,
 		ledgers: ledgers,
+		wagers:  wagers,
 		ids:     ids,
 		clock:   clk,
 	}
@@ -92,10 +96,10 @@ type ReconcileOutput struct {
 	CheckedEntries    int
 }
 
-// Open cria uma carteira. Saldo positivo também persiste o ledger de abertura.
+// Open cria uma carteira. Saldo positivo também persiste ledger + OPENING na mesma TX.
 //
-// TODO(futuro): na mesma TX, persistir WagerTransaction OPENING (PROCESSED) e outbox
-// WagerTransactionProcessed + WalletBalanceChanged (README §9 abertura).
+// TODO(futuro): na mesma TX, gravar outbox WagerTransactionProcessed + WalletBalanceChanged
+// (README §9 abertura).
 func (uc *UseCase) Open(ctx context.Context, in OpenInput) (WalletView, error) {
 	if in.PlayerID == "" {
 		return WalletView{}, fmt.Errorf("%w: playerId", usecase.ErrInvalidInput)
@@ -120,12 +124,31 @@ func (uc *UseCase) Open(ctx context.Context, in OpenInput) (WalletView, error) {
 		return WalletView{}, fmt.Errorf("%w: %v", usecase.ErrInvalidInput, err)
 	}
 
+	var openingTx domainwager.Transaction
+	if !in.InitialBalance.IsZero() {
+		openingTx, err = domainwager.NewOpening(domainwager.OpeningParams{
+			ID:       params.OpeningTxID,
+			WalletID: params.WalletID,
+			PlayerID: params.PlayerID,
+			Amount:   in.InitialBalance,
+			Now:      params.Now,
+		})
+		if err != nil {
+			return WalletView{}, fmt.Errorf("%w: opening: %v", usecase.ErrInvalidInput, err)
+		}
+	}
+
 	err = uc.tx.WithinTx(ctx, func(q gateway.Querier) error {
 		if err := uc.wallets.Insert(ctx, q, opened.Wallet); err != nil {
 			return err
 		}
 		if opened.Ledger != nil {
 			if err := uc.ledgers.Insert(ctx, q, *opened.Ledger); err != nil {
+				return err
+			}
+		}
+		if openingTx.ID() != "" {
+			if err := uc.wagers.Insert(ctx, q, openingTx); err != nil {
 				return err
 			}
 		}
