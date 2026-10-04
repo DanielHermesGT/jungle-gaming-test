@@ -157,9 +157,13 @@ func TestFSMHappyPathAndTerminalBlock(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 
-	awaiting, err := tx.AwaitReference(now.Add(time.Second))
+	until := now.Add(15 * time.Minute)
+	awaiting, err := tx.AwaitReference(until, now.Add(time.Second))
 	if err != nil || awaiting.Status() != wager.StatusPendingReference {
 		t.Fatalf("AwaitReference: status=%s err=%v", awaiting.Status(), err)
+	}
+	if !awaiting.PendingReferenceUntil().Equal(until) {
+		t.Fatalf("until=%v", awaiting.PendingReferenceUntil())
 	}
 
 	bal := mustMoney(t, 900)
@@ -174,7 +178,7 @@ func TestFSMHappyPathAndTerminalBlock(t *testing.T) {
 	if _, err := processed.MarkRejected(wager.FailureInsufficientFunds, now); !errors.Is(err, wager.ErrTerminalStatus) {
 		t.Fatalf("terminal reject: want ErrTerminalStatus, got %v", err)
 	}
-	if _, err := processed.AwaitReference(now); !errors.Is(err, wager.ErrTerminalStatus) {
+	if _, err := processed.AwaitReference(now.Add(time.Minute), now); !errors.Is(err, wager.ErrTerminalStatus) {
 		t.Fatalf("terminal await: want ErrTerminalStatus, got %v", err)
 	}
 }

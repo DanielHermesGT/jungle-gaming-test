@@ -30,6 +30,7 @@ type Transaction struct {
 	gameID                       string
 	referenceExternalTransaction string
 	resolvedReferenceID          string
+	pendingReferenceUntil        time.Time // zero when not awaiting reference
 }
 
 // NewOpening creates an INTERNAL OPENING already in PROCESSED (README §9).
@@ -113,6 +114,7 @@ type PersistedParams struct {
 	GameID                       string
 	ReferenceExternalTransaction string
 	ResolvedReferenceID          string
+	PendingReferenceUntil        time.Time
 }
 
 // FromPersisted rebuilds a Transaction from persisted state.
@@ -178,6 +180,7 @@ func FromPersisted(p PersistedParams) (Transaction, error) {
 		gameID:                       p.GameID,
 		referenceExternalTransaction: p.ReferenceExternalTransaction,
 		resolvedReferenceID:          p.ResolvedReferenceID,
+		pendingReferenceUntil:        p.PendingReferenceUntil,
 	}, nil
 }
 
@@ -200,13 +203,14 @@ func (t Transaction) RoundID() string                      { return t.roundID }
 func (t Transaction) GameID() string                       { return t.gameID }
 func (t Transaction) ReferenceExternalTransaction() string { return t.referenceExternalTransaction }
 func (t Transaction) ResolvedReferenceID() string          { return t.resolvedReferenceID }
+func (t Transaction) PendingReferenceUntil() time.Time     { return t.pendingReferenceUntil }
 
 func (t Transaction) valid() bool {
 	return t.id != "" && t.walletID != "" && t.playerID != "" && moneyInitialized(t.amount)
 }
 
-// AwaitReference moves PENDING → PENDING_REFERENCE.
-func (t Transaction) AwaitReference(now time.Time) (Transaction, error) {
+// AwaitReference moves PENDING → PENDING_REFERENCE and records the wait deadline.
+func (t Transaction) AwaitReference(until, now time.Time) (Transaction, error) {
 	if !t.valid() {
 		return Transaction{}, ErrUninitialized
 	}
@@ -216,8 +220,12 @@ func (t Transaction) AwaitReference(now time.Time) (Transaction, error) {
 	if t.status != StatusPending {
 		return Transaction{}, ErrInvalidTransition
 	}
+	if until.IsZero() {
+		return Transaction{}, ErrInvalidInput
+	}
 	next := t
 	next.status = StatusPendingReference
+	next.pendingReferenceUntil = until.UTC()
 	next.updatedAt = now
 	return next, nil
 }
@@ -241,6 +249,7 @@ func (t Transaction) MarkProcessed(resultBalance *money.Money, now time.Time) (T
 	next.status = StatusProcessed
 	next.resultBalance = resultBalance
 	next.failureCode = ""
+	next.pendingReferenceUntil = time.Time{}
 	next.updatedAt = now
 	return next, nil
 }
@@ -271,6 +280,7 @@ func (t Transaction) markTerminal(target Status, code FailureCode, now time.Time
 	next := t
 	next.status = target
 	next.failureCode = code
+	next.pendingReferenceUntil = time.Time{}
 	next.updatedAt = now
 	return next, nil
 }
