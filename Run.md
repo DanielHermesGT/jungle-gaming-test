@@ -70,25 +70,27 @@ Sem `OIDC_ISSUER_URL` / `DATABASE_URL` no ambiente, a API **não sobe**.
 
 ## 3. Migrations (obrigatório antes da API / dos curls)
 
-Cria as tabelas `wallets` e `wallet_ledger_entries`. Sem isso, auth pode passar e mesmo assim
+Cria `wallets`, `wallet_ledger_entries` e `wager_transactions`. Sem `000001`, auth pode passar e mesmo assim
 `POST /wallets` responde `{"code":"internal_error"}` (relação inexistente no Postgres).
 
 ```sh
 # preferível via Compose (não depende de psql no host):
 docker compose exec -T postgres psql -U jungle -d jungle < migrations/000001_wallets_ledger.up.sql
+docker compose exec -T postgres psql -U jungle -d jungle < migrations/000002_wager_transactions.up.sql
 
 # ou, com psql local + .env carregado:
 psql "$DATABASE_URL" -f migrations/000001_wallets_ledger.up.sql
+psql "$DATABASE_URL" -f migrations/000002_wager_transactions.up.sql
 ```
 
 Confira:
 
 ```sh
 docker compose exec -T postgres psql -U jungle -d jungle -c '\dt'
-# deve listar wallets e wallet_ledger_entries
+# deve listar wallets, wallet_ledger_entries e wager_transactions
 ```
 
-Reverter: `migrations/000001_wallets_ledger.down.sql`.
+Reverter (ordem inversa): `000002_wager_transactions.down.sql`, depois `000001_wallets_ledger.down.sql`.
 
 ## 4. Subir a API
 

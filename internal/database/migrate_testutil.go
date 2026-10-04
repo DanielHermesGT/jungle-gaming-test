@@ -31,6 +31,7 @@ func applyMigrations(t *testing.T, db *DB) {
 
 	// Reset schema for isolated repo tests.
 	_, err := db.Pool.Exec(ctx, `
+DROP TABLE IF EXISTS wager_transactions;
 DROP TABLE IF EXISTS wallet_ledger_entries;
 DROP TABLE IF EXISTS wallets;
 `)
@@ -38,12 +39,17 @@ DROP TABLE IF EXISTS wallets;
 		t.Fatalf("reset schema: %v", err)
 	}
 
-	upSQL, err := os.ReadFile(migrationPath("000001_wallets_ledger.up.sql"))
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := db.Pool.Exec(ctx, string(upSQL)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	for _, name := range []string{
+		"000001_wallets_ledger.up.sql",
+		"000002_wager_transactions.up.sql",
+	} {
+		upSQL, err := os.ReadFile(migrationPath(name))
+		if err != nil {
+			t.Fatalf("read migration %s: %v", name, err)
+		}
+		if _, err := db.Pool.Exec(ctx, string(upSQL)); err != nil {
+			t.Fatalf("apply migration %s: %v", name, err)
+		}
 	}
 }
 

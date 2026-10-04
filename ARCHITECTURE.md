@@ -82,7 +82,7 @@ Erros sentinela classificáveis com `errors.Is`:
 | `0.00` | Wallet com `version = 1`, sem lançamento de ledger |
 | `> 0` | Wallet com `version = 1` + um `CREDIT` de abertura no ledger (`balanceBefore = 0`) |
 
-A transação de negócio `OPENING` / eventos de outbox ficam na application layer; o domínio wallet apenas materializa saldo + ledger de abertura.
+A transação de negócio `OPENING` / eventos de outbox ficam na application layer; o domínio wallet apenas materializa saldo + ledger de abertura. O agregado `wager.Transaction` (OPENING) já existe em `internal/domain/wager` — a ligação `wallet.Open` → `NewOpening` + persistência é fatia futura.
 
 ### Ledger
 
@@ -222,6 +222,65 @@ Rotas (`net/http` ServeMux):
 
 Erros de use case → HTTP: `400` invalid, `404` not found, `409` conflict, `500` demais.  
 Auth → `401` unauthorized, `403` forbidden.
+
+## WagerTransaction
+
+### Agregado
+
+`Transaction` em `internal/domain/wager` é o agregado de negócio do README (`WagerTransaction`).
+
+- Estado encapsulado + getters; erros sentinela (`errors.Is`); sem Fx/HTTP/pgx.
+- IDs e timestamps vêm da application layer.
+- Dinheiro só via `money.Money` (`amount_minor` + `currency` no SQL).
+- Criação ≠ reidratação: `NewOpening` / `NewExternal` validam regras; `FromPersisted` reconstrói sem transição.
+
+| Construtor | Origem | Status inicial |
+| --- | --- | --- |
+| `NewOpening` | `INTERNAL` | `PROCESSED` (README §9) |
+| `NewExternal` | `EXTERNAL` | `PENDING` |
+| `FromPersisted` | qualquer | preserva |
+
+`NewExternal` rejeita `OPENING`. REFUND/ROLLBACK exigem `referenceExternalTransactionID`.
+
+### Kinds e amounts
+
+| Kind | Origem | Amount |
+| --- | --- | --- |
+| `OPENING` | INTERNAL | ≥ 0 |
+| `BET` / `WIN` / `REFUND` / `ROLLBACK` | EXTERNAL | > 0 |
+| `LOSS` | EXTERNAL | `0.00` |
+
+Movimento de carteira (CREDIT/DEBIT) e resolução cruzada de referência ficam no use case futuro — o domínio só guarda estado e FSM.
+
+### FSM
+
+```text
+PENDING → PENDING_REFERENCE | PROCESSED | REJECTED | FAILED
+PENDING_REFERENCE → PROCESSED | REJECTED | FAILED
+PROCESSED | REJECTED | FAILED  (terminal → ErrTerminalStatus)
+```
+
+Métodos (value receiver → novo estado): `AwaitReference`, `MarkProcessed`, `MarkRejected`, `MarkFailed`, `ResolveReference`.
+
+### Failure codes (estáveis)
+
+`INSUFFICIENT_FUNDS`, `REVERSAL_INSUFFICIENT_FUNDS`, `REFERENCE_NOT_FOUND`, `REFERENCE_NOT_PROCESSED`, `DUPLICATE_REVERSAL`, `INVALID_AMOUNT`, `INVALID_KIND`, `INVALID_TRANSITION`.
+
+Códigos de conflito de idempotência ficam na application layer.
+
+### Persistência (`migrations/000002`)
+
+Tabela `wager_transactions` com CHECKs de origin/kind/status/amount e:
+
+- INTERNAL ⇒ `kind = OPENING` e colunas externas NULL
+- EXTERNAL ⇒ `kind <> OPENING` e campos de provedor NOT NULL
+- `UNIQUE (wallet_id) WHERE kind = OPENING` — um crédito inicial por carteira
+- `UNIQUE (provider_id, external_transaction_id)` e `UNIQUE (idempotency_key)` só em EXTERNAL
+- FK `wallet_id → wallets(id)`
+
+### Domínio vs app (ainda não nesta fase)
+
+Fora do pacote `wager` (próximas fatias): use case de processamento, HTTP `/wagering`, SQS, inbox/outbox, repo/gateway, e `wallet.Open` persistindo OPENING na mesma TX.
 
 ## Autenticação e autorização
 
