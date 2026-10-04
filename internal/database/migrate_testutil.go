@@ -42,6 +42,7 @@ DROP TABLE IF EXISTS wallets;
 	for _, name := range []string{
 		"000001_wallets_ledger.up.sql",
 		"000002_wager_transactions.up.sql",
+		"000003_wager_pending_reference_ttl.up.sql",
 	} {
 		upSQL, err := os.ReadFile(migrationPath(name))
 		if err != nil {

@@ -16,6 +16,7 @@ var Module = fx.Module("database",
 		func(db *DB) gateway.DB { return db },
 		fx.Annotate(NewWalletRepo, fx.As(new(gateway.WalletRepository))),
 		fx.Annotate(NewLedgerRepo, fx.As(new(gateway.LedgerRepository))),
+		fx.Annotate(NewWagerRepo, fx.As(new(gateway.WagerRepository))),
 	),
 	fx.Invoke(registerDBLifecycle),
 )
