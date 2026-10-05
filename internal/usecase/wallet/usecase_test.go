@@ -105,7 +105,7 @@ func TestListLedgerPagesAndReconcile(t *testing.T) {
 	ctx := context.Background()
 	ids := &seqIDs{}
 	clk := fixedClock{at: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
-	uc := usecasewallet.NewUseCase(db, database.NewWalletRepo(), database.NewLedgerRepo(), database.NewWagerRepo(), ids, clk)
+	uc := usecasewallet.NewUseCase(db, database.NewWalletRepo(), database.NewLedgerRepo(), database.NewWagerRepo(), database.NewOutboxRepo(), ids, clk)
 
 	opened, err := uc.Open(ctx, usecasewallet.OpenInput{
 		PlayerID:       "player-page",
@@ -193,6 +193,7 @@ func newUseCase(t *testing.T) (*usecasewallet.UseCase, *database.DB) {
 		database.NewWalletRepo(),
 		database.NewLedgerRepo(),
 		database.NewWagerRepo(),
+		database.NewOutboxRepo(),
 		&seqIDs{},
 		fixedClock{at: time.Date(2026, 10, 3, 15, 0, 0, 0, time.UTC)},
 	)

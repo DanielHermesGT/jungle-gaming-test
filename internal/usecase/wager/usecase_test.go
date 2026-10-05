@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/DanielHermesGT/jungle-gaming-test/internal/database"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/money"
 	domainwager "github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wager"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/usecase"
@@ -221,14 +220,7 @@ func processIn(
 
 func newUseCases(t *testing.T) (*usecasewallet.UseCase, *usecasewager.UseCase, *fixedClock) {
 	t.Helper()
-	db := database.OpenTestDB(t)
-	ids := &seqIDs{}
-	clk := &fixedClock{at: time.Date(2026, 10, 4, 15, 0, 0, 0, time.UTC)}
-	wallets := database.NewWalletRepo()
-	ledgers := database.NewLedgerRepo()
-	wagers := database.NewWagerRepo()
-	wuc := usecasewallet.NewUseCase(db, wallets, ledgers, wagers, ids, clk)
-	guc := usecasewager.NewUseCase(db, wallets, ledgers, wagers, ids, clk)
+	wuc, guc, clk, _ := newUseCasesDB(t)
 	return wuc, guc, clk
 }
 

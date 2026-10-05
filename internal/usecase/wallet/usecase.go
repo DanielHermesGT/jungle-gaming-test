@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/event"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/money"
 	domainwager "github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wager"
 	domainwallet "github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wallet"
@@ -30,6 +31,7 @@ type UseCase struct {
 	wallets gateway.WalletRepository
 	ledgers gateway.LedgerRepository
 	wagers  gateway.WagerRepository
+	outbox  gateway.OutboxRepository
 	ids     idgen.Generator
 	clock   clock.Clock
 }
@@ -39,6 +41,7 @@ func NewUseCase(
 	wallets gateway.WalletRepository,
 	ledgers gateway.LedgerRepository,
 	wagers gateway.WagerRepository,
+	outbox gateway.OutboxRepository,
 	ids idgen.Generator,
 	clk clock.Clock,
 ) *UseCase {
@@ -48,6 +51,7 @@ func NewUseCase(
 		wallets: wallets,
 		ledgers: ledgers,
 		wagers:  wagers,
+		outbox:  outbox,
 		ids:     ids,
 		clock:   clk,
 	}
@@ -96,10 +100,7 @@ type ReconcileOutput struct {
 	CheckedEntries    int
 }
 
-// Open cria uma carteira. Saldo positivo também persiste ledger + OPENING na mesma TX.
-//
-// TODO(futuro): na mesma TX, gravar outbox WagerTransactionProcessed + WalletBalanceChanged
-// (README §9 abertura).
+// Open cria uma carteira. Saldo positivo persiste ledger + OPENING + outbox na mesma TX.
 func (uc *UseCase) Open(ctx context.Context, in OpenInput) (WalletView, error) {
 	if in.PlayerID == "" {
 		return WalletView{}, fmt.Errorf("%w: playerId", usecase.ErrInvalidInput)
@@ -147,12 +148,39 @@ func (uc *UseCase) Open(ctx context.Context, in OpenInput) (WalletView, error) {
 				return err
 			}
 		}
-		if openingTx.ID() != "" {
-			if err := uc.wagers.Insert(ctx, q, openingTx); err != nil {
-				return err
-			}
+		if openingTx.ID() == "" {
+			return nil
 		}
-		return nil
+		if err := uc.wagers.Insert(ctx, q, openingTx); err != nil {
+			return err
+		}
+		now := params.Now
+		processed, err := event.NewWagerProcessed(uc.ids.New(), openingTx.ID(), openingTx, now)
+		if err != nil {
+			return err
+		}
+		changed, err := event.NewWalletBalanceChanged(
+			uc.ids.New(), openingTx.ID(),
+			opened.Wallet.ID(), openingTx.ID(),
+			opened.Ledger.Direction(),
+			opened.Ledger.Amount(),
+			opened.Ledger.BalanceBefore(),
+			opened.Ledger.BalanceAfter(),
+			opened.Wallet.Version(),
+			now,
+		)
+		if err != nil {
+			return err
+		}
+		rec1, err := usecase.OutboxRecordFromEnvelope(processed, now)
+		if err != nil {
+			return err
+		}
+		rec2, err := usecase.OutboxRecordFromEnvelope(changed, now)
+		if err != nil {
+			return err
+		}
+		return uc.outbox.Insert(ctx, q, rec1, rec2)
 	})
 	if errors.Is(err, gateway.ErrConflict) {
 		return WalletView{}, fmt.Errorf("%w: player/currency", usecase.ErrConflict)

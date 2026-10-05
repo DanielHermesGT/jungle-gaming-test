@@ -18,13 +18,15 @@ import (
 // PendingReferenceTTL is how long a PENDING_REFERENCE waits before REJECTED (README §7).
 const PendingReferenceTTL = 15 * time.Minute
 
-// UseCase processes external wager transactions (shared by future HTTP/SQS).
+// UseCase processes external wager transactions (HTTP and SQS share Process).
 type UseCase struct {
 	tx      gateway.TxRunner
 	read    gateway.ReadQuerier
 	wallets gateway.WalletRepository
 	ledgers gateway.LedgerRepository
 	wagers  gateway.WagerRepository
+	outbox  gateway.OutboxRepository
+	inbox   gateway.InboxRepository
 	ids     idgen.Generator
 	clock   clock.Clock
 }
@@ -34,6 +36,8 @@ func NewUseCase(
 	wallets gateway.WalletRepository,
 	ledgers gateway.LedgerRepository,
 	wagers gateway.WagerRepository,
+	outbox gateway.OutboxRepository,
+	inbox gateway.InboxRepository,
 	ids idgen.Generator,
 	clk clock.Clock,
 ) *UseCase {
@@ -43,6 +47,8 @@ func NewUseCase(
 		wallets: wallets,
 		ledgers: ledgers,
 		wagers:  wagers,
+		outbox:  outbox,
+		inbox:   inbox,
 		ids:     ids,
 		clock:   clk,
 	}
@@ -63,14 +69,20 @@ type ProcessInput struct {
 	PayloadHash                    string
 }
 
-// ProcessResult is the outcome of Process / ResumePendingReference.
+// ProcessResult is the outcome of Process / ResumePendingReference / ProcessFromQueue.
 type ProcessResult struct {
 	Transaction      domainwager.Transaction
 	Balance          *money.Money
 	IdempotentReplay bool
 }
 
-// Process applies an external wager atomically (wallet + ledger + wager).
+type applyOutcome struct {
+	tx     domainwager.Transaction
+	bal    *money.Money
+	ledger *domainwallet.LedgerEntry
+}
+
+// Process applies an external wager atomically (wallet + ledger + wager + outbox).
 func (uc *UseCase) Process(ctx context.Context, in ProcessInput) (ProcessResult, error) {
 	if err := validateProcessInput(in); err != nil {
 		return ProcessResult{}, err
@@ -78,85 +90,161 @@ func (uc *UseCase) Process(ctx context.Context, in ProcessInput) (ProcessResult,
 
 	var out ProcessResult
 	err := uc.tx.WithinTx(ctx, func(q gateway.Querier) error {
-		existing, err := uc.wagers.GetByIdempotencyKey(ctx, q, in.IdempotencyKey)
-		if err == nil {
-			if existing.PayloadHash() != in.PayloadHash {
-				return fmt.Errorf("%w: idempotency payload mismatch", usecase.ErrConflict)
-			}
-			out = ProcessResult{
-				Transaction:      existing,
-				Balance:          existing.ResultBalance(),
-				IdempotentReplay: true,
-			}
-			return nil
-		}
-		if !errors.Is(err, gateway.ErrNotFound) {
-			return err
-		}
-
-		if _, err := uc.wagers.GetByProviderExternal(ctx, q, in.ProviderID, in.ExternalTransactionID); err == nil {
-			return fmt.Errorf("%w: provider/external already used", usecase.ErrConflict)
-		} else if !errors.Is(err, gateway.ErrNotFound) {
-			return err
-		}
-
-		w, err := uc.wallets.GetByIDForUpdate(ctx, q, in.WalletID)
-		if errors.Is(err, gateway.ErrNotFound) {
-			return usecase.ErrNotFound
-		}
+		var ledger *domainwallet.LedgerEntry
+		var err error
+		out, ledger, err = uc.processInTx(ctx, q, in)
 		if err != nil {
 			return err
 		}
-
-		now := uc.clock.Now().UTC()
-		tx, err := domainwager.NewExternal(domainwager.ExternalParams{
-			ID:                           uc.ids.New(),
-			Kind:                         in.Kind,
-			WalletID:                     in.WalletID,
-			PlayerID:                     in.PlayerID,
-			ProviderID:                   in.ProviderID,
-			ExternalTransactionID:        in.ExternalTransactionID,
-			IdempotencyKey:               in.IdempotencyKey,
-			PayloadHash:                  in.PayloadHash,
-			RoundID:                      in.RoundID,
-			GameID:                       in.GameID,
-			Amount:                       in.Amount,
-			ReferenceExternalTransaction: in.ReferenceExternalTransactionID,
-			Now:                          now,
-		})
-		if err != nil {
-			return fmt.Errorf("%w: %v", usecase.ErrInvalidInput, err)
-		}
-
-		if w.PlayerID() != in.PlayerID || w.Balance().Currency() != in.Amount.Currency() {
-			rejected, err := tx.MarkRejected(domainwager.FailureInvalidAmount, now)
-			if err != nil {
-				return err
-			}
-			if err := uc.wagers.Insert(ctx, q, rejected); err != nil {
-				return err
-			}
-			out = ProcessResult{Transaction: rejected}
-			return nil
-		}
-
-		final, bal, err := uc.applyKind(ctx, q, w, tx, now)
-		if err != nil {
-			return err
-		}
-		if err := uc.wagers.Insert(ctx, q, final); err != nil {
-			if errors.Is(err, gateway.ErrConflict) {
-				return fmt.Errorf("%w: wager unique", usecase.ErrConflict)
-			}
-			return err
-		}
-		out = ProcessResult{Transaction: final, Balance: bal}
-		return nil
+		return uc.emitForResult(ctx, q, out, ledger, uc.clock.Now().UTC())
 	})
 	if err != nil {
 		return ProcessResult{}, err
 	}
 	return out, nil
+}
+
+// ProcessFromQueue processes a wager from SQS with durable inbox dedup in the same TX.
+func (uc *UseCase) ProcessFromQueue(
+	ctx context.Context,
+	consumerName, messageID, payloadHash string,
+	in ProcessInput,
+) (ProcessResult, error) {
+	if consumerName == "" || messageID == "" || payloadHash == "" {
+		return ProcessResult{}, fmt.Errorf("%w: inbox keys", usecase.ErrInvalidInput)
+	}
+	if err := validateProcessInput(in); err != nil {
+		return ProcessResult{}, err
+	}
+
+	var out ProcessResult
+	err := uc.tx.WithinTx(ctx, func(q gateway.Querier) error {
+		now := uc.clock.Now().UTC()
+		existing, err := uc.inbox.Get(ctx, q, consumerName, messageID)
+		if err == nil {
+			if existing.PayloadHash != payloadHash {
+				return fmt.Errorf("%w: inbox payload hash mismatch", usecase.ErrPermanent)
+			}
+			if existing.CompletedAt != nil {
+				// Replay: load financial idempotent result if present.
+				tx, gErr := uc.wagers.GetByIdempotencyKey(ctx, q, in.IdempotencyKey)
+				if gErr != nil {
+					return gErr
+				}
+				out = ProcessResult{
+					Transaction:      tx,
+					Balance:          tx.ResultBalance(),
+					IdempotentReplay: true,
+				}
+				return nil
+			}
+		} else if !errors.Is(err, gateway.ErrNotFound) {
+			return err
+		} else if err := uc.inbox.InsertReceived(ctx, q, gateway.InboxMessage{
+			ConsumerName: consumerName,
+			MessageID:    messageID,
+			PayloadHash:  payloadHash,
+			ReceivedAt:   now,
+		}); err != nil {
+			// Concurrent claim of the same SQS message — retry on next delivery.
+			if errors.Is(err, gateway.ErrConflict) {
+				return fmt.Errorf("%w: inbox race", err)
+			}
+			return err
+		}
+
+		var ledger *domainwallet.LedgerEntry
+		out, ledger, err = uc.processInTx(ctx, q, in)
+		if err != nil {
+			return err
+		}
+		if err := uc.emitForResult(ctx, q, out, ledger, now); err != nil {
+			return err
+		}
+		return uc.inbox.MarkCompleted(ctx, q, consumerName, messageID, now)
+	})
+	if err != nil {
+		return ProcessResult{}, err
+	}
+	return out, nil
+}
+
+func (uc *UseCase) processInTx(
+	ctx context.Context,
+	q gateway.Querier,
+	in ProcessInput,
+) (ProcessResult, *domainwallet.LedgerEntry, error) {
+	existing, err := uc.wagers.GetByIdempotencyKey(ctx, q, in.IdempotencyKey)
+	if err == nil {
+		if existing.PayloadHash() != in.PayloadHash {
+			return ProcessResult{}, nil, fmt.Errorf("%w: idempotency payload mismatch", usecase.ErrConflict)
+		}
+		return ProcessResult{
+			Transaction:      existing,
+			Balance:          existing.ResultBalance(),
+			IdempotentReplay: true,
+		}, nil, nil
+	}
+	if !errors.Is(err, gateway.ErrNotFound) {
+		return ProcessResult{}, nil, err
+	}
+
+	if _, err := uc.wagers.GetByProviderExternal(ctx, q, in.ProviderID, in.ExternalTransactionID); err == nil {
+		return ProcessResult{}, nil, fmt.Errorf("%w: provider/external already used", usecase.ErrConflict)
+	} else if !errors.Is(err, gateway.ErrNotFound) {
+		return ProcessResult{}, nil, err
+	}
+
+	w, err := uc.wallets.GetByIDForUpdate(ctx, q, in.WalletID)
+	if errors.Is(err, gateway.ErrNotFound) {
+		return ProcessResult{}, nil, usecase.ErrNotFound
+	}
+	if err != nil {
+		return ProcessResult{}, nil, err
+	}
+
+	now := uc.clock.Now().UTC()
+	tx, err := domainwager.NewExternal(domainwager.ExternalParams{
+		ID:                           uc.ids.New(),
+		Kind:                         in.Kind,
+		WalletID:                     in.WalletID,
+		PlayerID:                     in.PlayerID,
+		ProviderID:                   in.ProviderID,
+		ExternalTransactionID:        in.ExternalTransactionID,
+		IdempotencyKey:               in.IdempotencyKey,
+		PayloadHash:                  in.PayloadHash,
+		RoundID:                      in.RoundID,
+		GameID:                       in.GameID,
+		Amount:                       in.Amount,
+		ReferenceExternalTransaction: in.ReferenceExternalTransactionID,
+		Now:                          now,
+	})
+	if err != nil {
+		return ProcessResult{}, nil, fmt.Errorf("%w: %v", usecase.ErrInvalidInput, err)
+	}
+
+	if w.PlayerID() != in.PlayerID || w.Balance().Currency() != in.Amount.Currency() {
+		rejected, err := tx.MarkRejected(domainwager.FailureInvalidAmount, now)
+		if err != nil {
+			return ProcessResult{}, nil, err
+		}
+		if err := uc.wagers.Insert(ctx, q, rejected); err != nil {
+			return ProcessResult{}, nil, err
+		}
+		return ProcessResult{Transaction: rejected}, nil, nil
+	}
+
+	outcome, err := uc.applyKind(ctx, q, w, tx, now)
+	if err != nil {
+		return ProcessResult{}, nil, err
+	}
+	if err := uc.wagers.Insert(ctx, q, outcome.tx); err != nil {
+		if errors.Is(err, gateway.ErrConflict) {
+			return ProcessResult{}, nil, fmt.Errorf("%w: wager unique", usecase.ErrConflict)
+		}
+		return ProcessResult{}, nil, err
+	}
+	return ProcessResult{Transaction: outcome.tx, Balance: outcome.bal}, outcome.ledger, nil
 }
 
 func (uc *UseCase) applyKind(
@@ -165,7 +253,7 @@ func (uc *UseCase) applyKind(
 	w domainwallet.Wallet,
 	tx domainwager.Transaction,
 	now time.Time,
-) (domainwager.Transaction, *money.Money, error) {
+) (applyOutcome, error) {
 	switch tx.Kind() {
 	case domainwager.KindBet:
 		return uc.applyDebit(ctx, q, w, tx, now, domainwager.FailureInsufficientFunds)
@@ -176,18 +264,18 @@ func (uc *UseCase) applyKind(
 				return uc.awaitReference(tx, now)
 			}
 			if err != nil {
-				return domainwager.Transaction{}, nil, err
+				return applyOutcome{}, err
 			}
 			if err := validateReference(tx, ref, false); err != nil {
 				rejected, mErr := tx.MarkRejected(errCode(err), now)
 				if mErr != nil {
-					return domainwager.Transaction{}, nil, mErr
+					return applyOutcome{}, mErr
 				}
-				return rejected, nil, nil
+				return applyOutcome{tx: rejected}, nil
 			}
 			resolved, err := tx.ResolveReference(ref.ID(), now)
 			if err != nil {
-				return domainwager.Transaction{}, nil, err
+				return applyOutcome{}, err
 			}
 			tx = resolved
 		}
@@ -195,14 +283,14 @@ func (uc *UseCase) applyKind(
 	case domainwager.KindLoss:
 		processed, err := tx.MarkProcessed(nil, now)
 		if err != nil {
-			return domainwager.Transaction{}, nil, err
+			return applyOutcome{}, err
 		}
 		bal := w.Balance()
-		return processed, &bal, nil
+		return applyOutcome{tx: processed, bal: &bal}, nil
 	case domainwager.KindRefund, domainwager.KindRollback:
 		return uc.applyReversal(ctx, q, w, tx, now)
 	default:
-		return domainwager.Transaction{}, nil, fmt.Errorf("%w: kind", usecase.ErrInvalidInput)
+		return applyOutcome{}, fmt.Errorf("%w: kind", usecase.ErrInvalidInput)
 	}
 }
 
@@ -213,30 +301,31 @@ func (uc *UseCase) applyDebit(
 	tx domainwager.Transaction,
 	now time.Time,
 	insufficientCode domainwager.FailureCode,
-) (domainwager.Transaction, *money.Money, error) {
+) (applyOutcome, error) {
 	moved, err := w.Debit(uc.ids.New(), tx.ID(), tx.Amount(), now)
 	if errors.Is(err, domainwallet.ErrInsufficientFunds) {
 		rejected, mErr := tx.MarkRejected(insufficientCode, now)
 		if mErr != nil {
-			return domainwager.Transaction{}, nil, mErr
+			return applyOutcome{}, mErr
 		}
-		return rejected, nil, nil
+		return applyOutcome{tx: rejected}, nil
 	}
 	if err != nil {
-		return domainwager.Transaction{}, nil, fmt.Errorf("%w: %v", usecase.ErrInvalidInput, err)
+		return applyOutcome{}, fmt.Errorf("%w: %v", usecase.ErrInvalidInput, err)
 	}
 	if err := uc.wallets.Update(ctx, q, moved.Wallet); err != nil {
-		return domainwager.Transaction{}, nil, err
+		return applyOutcome{}, err
 	}
 	if err := uc.ledgers.Insert(ctx, q, moved.Ledger); err != nil {
-		return domainwager.Transaction{}, nil, err
+		return applyOutcome{}, err
 	}
 	bal := moved.Wallet.Balance()
+	ledger := moved.Ledger
 	processed, err := tx.MarkProcessed(&bal, now)
 	if err != nil {
-		return domainwager.Transaction{}, nil, err
+		return applyOutcome{}, err
 	}
-	return processed, &bal, nil
+	return applyOutcome{tx: processed, bal: &bal, ledger: &ledger}, nil
 }
 
 func (uc *UseCase) applyCredit(
@@ -245,23 +334,24 @@ func (uc *UseCase) applyCredit(
 	w domainwallet.Wallet,
 	tx domainwager.Transaction,
 	now time.Time,
-) (domainwager.Transaction, *money.Money, error) {
+) (applyOutcome, error) {
 	moved, err := w.Credit(uc.ids.New(), tx.ID(), tx.Amount(), now)
 	if err != nil {
-		return domainwager.Transaction{}, nil, fmt.Errorf("%w: %v", usecase.ErrInvalidInput, err)
+		return applyOutcome{}, fmt.Errorf("%w: %v", usecase.ErrInvalidInput, err)
 	}
 	if err := uc.wallets.Update(ctx, q, moved.Wallet); err != nil {
-		return domainwager.Transaction{}, nil, err
+		return applyOutcome{}, err
 	}
 	if err := uc.ledgers.Insert(ctx, q, moved.Ledger); err != nil {
-		return domainwager.Transaction{}, nil, err
+		return applyOutcome{}, err
 	}
 	bal := moved.Wallet.Balance()
+	ledger := moved.Ledger
 	processed, err := tx.MarkProcessed(&bal, now)
 	if err != nil {
-		return domainwager.Transaction{}, nil, err
+		return applyOutcome{}, err
 	}
-	return processed, &bal, nil
+	return applyOutcome{tx: processed, bal: &bal, ledger: &ledger}, nil
 }
 
 func (uc *UseCase) applyReversal(
@@ -270,22 +360,22 @@ func (uc *UseCase) applyReversal(
 	w domainwallet.Wallet,
 	tx domainwager.Transaction,
 	now time.Time,
-) (domainwager.Transaction, *money.Money, error) {
+) (applyOutcome, error) {
 	ref, err := uc.wagers.GetByProviderExternal(ctx, q, tx.ProviderID(), tx.ReferenceExternalTransaction())
 	if errors.Is(err, gateway.ErrNotFound) {
 		return uc.awaitReference(tx, now)
 	}
 	if err != nil {
-		return domainwager.Transaction{}, nil, err
+		return applyOutcome{}, err
 	}
 
 	if ref.Status() != domainwager.StatusProcessed {
 		if ref.Status().IsTerminal() {
 			rejected, mErr := tx.MarkRejected(domainwager.FailureReferenceNotProcessed, now)
 			if mErr != nil {
-				return domainwager.Transaction{}, nil, mErr
+				return applyOutcome{}, mErr
 			}
-			return rejected, nil, nil
+			return applyOutcome{tx: rejected}, nil
 		}
 		return uc.awaitReference(tx, now)
 	}
@@ -294,32 +384,31 @@ func (uc *UseCase) applyReversal(
 	if err := validateReference(tx, ref, requireBet); err != nil {
 		rejected, mErr := tx.MarkRejected(errCode(err), now)
 		if mErr != nil {
-			return domainwager.Transaction{}, nil, mErr
+			return applyOutcome{}, mErr
 		}
-		return rejected, nil, nil
+		return applyOutcome{tx: rejected}, nil
 	}
 
 	dup, err := uc.wagers.GetProcessedReversal(ctx, q, tx.ProviderID(), tx.ReferenceExternalTransaction(), tx.Kind())
 	if err == nil && dup.ID() != "" {
 		rejected, mErr := tx.MarkRejected(domainwager.FailureDuplicateReversal, now)
 		if mErr != nil {
-			return domainwager.Transaction{}, nil, mErr
+			return applyOutcome{}, mErr
 		}
-		return rejected, nil, nil
+		return applyOutcome{tx: rejected}, nil
 	}
 	if err != nil && !errors.Is(err, gateway.ErrNotFound) {
-		return domainwager.Transaction{}, nil, err
+		return applyOutcome{}, err
 	}
 
 	resolved, err := tx.ResolveReference(ref.ID(), now)
 	if err != nil {
-		return domainwager.Transaction{}, nil, err
+		return applyOutcome{}, err
 	}
 	tx = resolved
 
 	switch tx.Kind() {
 	case domainwager.KindRefund:
-		// REFUND credits back a BET debit.
 		return uc.applyCredit(ctx, q, w, tx, now)
 	case domainwager.KindRollback:
 		switch ref.Kind() {
@@ -330,21 +419,21 @@ func (uc *UseCase) applyReversal(
 		default:
 			rejected, mErr := tx.MarkRejected(domainwager.FailureInvalidKind, now)
 			if mErr != nil {
-				return domainwager.Transaction{}, nil, mErr
+				return applyOutcome{}, mErr
 			}
-			return rejected, nil, nil
+			return applyOutcome{tx: rejected}, nil
 		}
 	default:
-		return domainwager.Transaction{}, nil, fmt.Errorf("%w: kind", usecase.ErrInvalidInput)
+		return applyOutcome{}, fmt.Errorf("%w: kind", usecase.ErrInvalidInput)
 	}
 }
 
-func (uc *UseCase) awaitReference(tx domainwager.Transaction, now time.Time) (domainwager.Transaction, *money.Money, error) {
+func (uc *UseCase) awaitReference(tx domainwager.Transaction, now time.Time) (applyOutcome, error) {
 	pending, err := tx.AwaitReference(now.Add(PendingReferenceTTL), now)
 	if err != nil {
-		return domainwager.Transaction{}, nil, err
+		return applyOutcome{}, err
 	}
-	return pending, nil, nil
+	return applyOutcome{tx: pending}, nil
 }
 
 // ResumePendingReference continues or expires a PENDING_REFERENCE transaction.
@@ -389,19 +478,23 @@ func (uc *UseCase) ResumePendingReference(ctx context.Context, wagerID string) (
 				return err
 			}
 			out = ProcessResult{Transaction: rejected}
-			return nil
+			return uc.emitForResult(ctx, q, out, nil, now)
 		}
 
-		// Rebuild a PENDING view for applyReversal/await paths by using domain transitions from PENDING_REFERENCE.
-		final, bal, err := uc.resumeApply(ctx, q, w, tx, now)
+		outcome, err := uc.resumeApply(ctx, q, w, tx, now)
 		if err != nil {
 			return err
 		}
-		if err := uc.wagers.Update(ctx, q, final); err != nil {
+		if outcome.tx.ID() == tx.ID() && outcome.tx.Status() == domainwager.StatusPendingReference {
+			// Still waiting; no status change → no outbox.
+			out = ProcessResult{Transaction: outcome.tx, Balance: outcome.bal}
+			return nil
+		}
+		if err := uc.wagers.Update(ctx, q, outcome.tx); err != nil {
 			return err
 		}
-		out = ProcessResult{Transaction: final, Balance: bal}
-		return nil
+		out = ProcessResult{Transaction: outcome.tx, Balance: outcome.bal}
+		return uc.emitForResult(ctx, q, out, outcome.ledger, now)
 	})
 	if err != nil {
 		return ProcessResult{}, err
@@ -415,51 +508,50 @@ func (uc *UseCase) resumeApply(
 	w domainwallet.Wallet,
 	tx domainwager.Transaction,
 	now time.Time,
-) (domainwager.Transaction, *money.Money, error) {
+) (applyOutcome, error) {
 	ref, err := uc.wagers.GetByProviderExternal(ctx, q, tx.ProviderID(), tx.ReferenceExternalTransaction())
 	if errors.Is(err, gateway.ErrNotFound) {
-		// Still waiting until TTL.
-		return tx, nil, nil
+		return applyOutcome{tx: tx}, nil
 	}
 	if err != nil {
-		return domainwager.Transaction{}, nil, err
+		return applyOutcome{}, err
 	}
 
 	if ref.Status() != domainwager.StatusProcessed {
 		if ref.Status().IsTerminal() {
 			rejected, mErr := tx.MarkRejected(domainwager.FailureReferenceNotProcessed, now)
 			if mErr != nil {
-				return domainwager.Transaction{}, nil, mErr
+				return applyOutcome{}, mErr
 			}
-			return rejected, nil, nil
+			return applyOutcome{tx: rejected}, nil
 		}
-		return tx, nil, nil
+		return applyOutcome{tx: tx}, nil
 	}
 
 	requireBet := tx.Kind() == domainwager.KindRefund
 	if err := validateReference(tx, ref, requireBet); err != nil {
 		rejected, mErr := tx.MarkRejected(errCode(err), now)
 		if mErr != nil {
-			return domainwager.Transaction{}, nil, mErr
+			return applyOutcome{}, mErr
 		}
-		return rejected, nil, nil
+		return applyOutcome{tx: rejected}, nil
 	}
 
 	dup, err := uc.wagers.GetProcessedReversal(ctx, q, tx.ProviderID(), tx.ReferenceExternalTransaction(), tx.Kind())
 	if err == nil && dup.ID() != "" && dup.ID() != tx.ID() {
 		rejected, mErr := tx.MarkRejected(domainwager.FailureDuplicateReversal, now)
 		if mErr != nil {
-			return domainwager.Transaction{}, nil, mErr
+			return applyOutcome{}, mErr
 		}
-		return rejected, nil, nil
+		return applyOutcome{tx: rejected}, nil
 	}
 	if err != nil && !errors.Is(err, gateway.ErrNotFound) {
-		return domainwager.Transaction{}, nil, err
+		return applyOutcome{}, err
 	}
 
 	resolved, err := tx.ResolveReference(ref.ID(), now)
 	if err != nil {
-		return domainwager.Transaction{}, nil, err
+		return applyOutcome{}, err
 	}
 	tx = resolved
 
@@ -475,14 +567,14 @@ func (uc *UseCase) resumeApply(
 		default:
 			rejected, mErr := tx.MarkRejected(domainwager.FailureInvalidKind, now)
 			if mErr != nil {
-				return domainwager.Transaction{}, nil, mErr
+				return applyOutcome{}, mErr
 			}
-			return rejected, nil, nil
+			return applyOutcome{tx: rejected}, nil
 		}
 	case domainwager.KindWin:
 		return uc.applyCredit(ctx, q, w, tx, now)
 	default:
-		return domainwager.Transaction{}, nil, fmt.Errorf("%w: kind", usecase.ErrInvalidInput)
+		return applyOutcome{}, fmt.Errorf("%w: kind", usecase.ErrInvalidInput)
 	}
 }
 

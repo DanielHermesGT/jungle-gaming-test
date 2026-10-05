@@ -200,15 +200,15 @@ Módulo `internal/usecase/wallet` — um `UseCase` com métodos:
 | `ListLedger` | ledger com cursor opaco `(created_at, id)` |
 | `Reconcile` | saldo armazenado vs ΣCREDIT−ΣDEBIT; não altera saldo |
 
-`Open` com saldo positivo persiste `WagerTransaction OPENING` na mesma TX que wallet + ledger. Outbox da abertura permanece `TODO(futuro)`.
+`Open` com saldo positivo persiste `WagerTransaction OPENING` + ledger + outbox (`WagerTransactionProcessed` + `WalletBalanceChanged`) na mesma TX. Saldo zero: só a carteira.
 
 ## HTTP + Uber Fx
 
-Composição em `internal/app` via `fx.Module`s: `config` → `auth` → `database` → `usecase/wallet` + `usecase/wager` → `web`.
+Composição em `internal/app` via `fx.Module`s: `config` → `auth` → `database` → `usecase/wallet` + `usecase/wager` → `messaging` → `web`.
 
 `fx.Lifecycle`:
-- `OnStart`: `http.Server.ListenAndServe` em goroutine
-- `OnStop`: `Shutdown` do HTTP + `DB.Close`
+- `OnStart`: HTTP server + loops SQS consumer / outbox publisher / pending-ref
+- `OnStop`: cancela workers, `Shutdown` do HTTP + `DB.Close`
 
 Rotas (`net/http` ServeMux):
 
@@ -222,7 +222,7 @@ Rotas (`net/http` ServeMux):
 | `GET` | `/wagering/transactions/{transactionId}` | JWT + claim; tx de outro provedor → **403** |
 | `GET` | `/providers/{providerId}/wagering/transactions/{externalTransactionId}` | `ProtectProviderPath` (claim == path) |
 | `GET` | `/health/live` | público |
-| `GET` | `/health/ready` | público (ping Postgres; SQS TODO) |
+| `GET` | `/health/ready` | público (ping Postgres + `GetQueueAttributes` na fila de entrada) |
 
 Erros de use case → HTTP: `400` invalid, `404` not found, `409` conflict, `500` demais.  
 Auth → `401` unauthorized, `403` forbidden.  
@@ -283,22 +283,22 @@ Tabela `wager_transactions` com CHECKs de origin/kind/status/amount e:
 - `UNIQUE (wallet_id) WHERE kind = OPENING` — um crédito inicial por carteira
 - `UNIQUE (provider_id, external_transaction_id)` e `UNIQUE (idempotency_key)` só em EXTERNAL
 - FK `wallet_id → wallets(id)`
-- `pending_reference_until` (000003) + índice parcial para worker futuro
+- `pending_reference_until` (000003) + índice parcial para o worker de referências
 
-Port `gateway.WagerRepository` / impl `database.WagerRepo` (Insert/Update/lookups/`ListPendingReferenceDue`).
+Port `gateway.WagerRepository` / impl `database.WagerRepo` (Insert/Update/lookups/`ListPendingReference`/`ListPendingReferenceDue`).
 
 ### Use case (`internal/usecase/wager`)
 
-`Process` é o fluxo compartilhado futuro de HTTP/SQS (ainda sem transporte):
+`processInTx` é o núcleo compartilhado por HTTP (`Process`) e SQS (`ProcessFromQueue`):
 
 1. Idempotência por chave + `payloadHash` (replay ou conflito)
 2. Unicidade `(providerId, externalTransactionId)`
 3. `GetByIDForUpdate` na wallet
 4. BET debit / WIN credit / LOSS sem ledger / REFUND·ROLLBACK com ref
 5. Ref ausente → `PENDING_REFERENCE` com TTL **15m** (`PendingReferenceTTL`)
-6. Commit atômico: wager + saldo + ledger
+6. Commit atômico: wager + saldo + ledger + **outbox** (+ **inbox** no caminho SQS)
 
-`ResumePendingReference` retoma ou expira (`REFERENCE_NOT_FOUND`) pendências — sem worker em background nesta fase.
+`ResumePendingReference` retoma ou expira (`REFERENCE_NOT_FOUND`) pendências; o worker `PendingRef` faz poll periódico.
 
 #### Hash canônico do payload
 
@@ -311,9 +311,52 @@ Header `Idempotency-Key` obrigatório no POST (não é substituído pelo servido
 
 Auth: `Authenticate` nas rotas genéricas; `ProtectProviderPath` na rota com `{providerId}` no path (reusa `RequireProvider`). Isolamento restante (body/tx) no handler.
 
-#### Ainda fora
+## Inbox + Outbox + SQS
 
-SQS, inbox, outbox (publisher e registros na TX), worker periódico de `PENDING_REFERENCE`.
+### Schemas (`migrations/000004`)
+
+| Tabela | Papel |
+| --- | --- |
+| `outbox_events` | snapshot imutável do envelope; `published_at NULL` = pendente; claim com `locked_at`/`locked_by` |
+| `inbox_messages` | dedup de transporte `(consumer_name, message_id)` + `payload_hash`; `completed_at` após commit |
+
+Nunca se publica na fila antes do commit da TX de domínio.
+
+### Eventos (`internal/domain/event`)
+
+Envelope: `eventId`, `eventType`, `aggregateId`, `correlationId`, `occurredAt` (UTC RFC3339), `version`, `data` (money em `"XX.YY"`).
+
+| `event_type` | Quando |
+| --- | --- |
+| `WagerTransactionProcessed` | PROCESSED (incl. LOSS e OPENING) |
+| `WagerTransactionRejected` | REJECTED |
+| `WalletBalanceChanged` | saldo mudou (Open>0, BET/WIN/REFUND/ROLLBACK) |
+| `WagerTransactionPendingReference` | entrou em PENDING_REFERENCE |
+
+### Filas (LocalStack)
+
+| Fila | Uso |
+| --- | --- |
+| `wager-transactions.fifo` | entrada (consumer) |
+| `wager-transactions-dlq.fifo` | DLQ + redrive (`maxReceiveCount=5`) |
+| `domain-events.fifo` | destino do publisher de outbox |
+
+Contrato de transporte (entrada):
+
+- `MessageGroupId` = `walletId` (serializa por carteira)
+- `MessageDeduplicationId` = `idempotencyKey` (dedup de transporte; **não** substitui inbox/idempotência financeira)
+
+Saída (publisher): `MessageGroupId` = `aggregateId`; `MessageDeduplicationId` = `eventId` (republicações preservam o id).
+
+### Workers (`internal/messaging`, mesmo processo Fx)
+
+| Worker | Comportamento |
+| --- | --- |
+| Consumer | long poll → `ProcessFromQueue` (inbox + `processInTx` + outbox) → delete pós-commit; inválido/permanente → DLQ + delete; transitório → visibility |
+| Publisher | `ClaimBatch` (`FOR UPDATE SKIP LOCKED`) → publish JSON → `MarkPublished`; falha → `MarkRetry` com backoff; reclaim se lock antigo (>30s) |
+| PendingRef | lista `PENDING_REFERENCE` → `ResumePendingReference` |
+
+`ProcessFromQueue`: inbox completed → replay (ack); hash mismatch → `ErrPermanent` (DLQ); `PENDING_REFERENCE` completa a inbox (worker de refs continua).
 
 ## Autenticação e autorização
 

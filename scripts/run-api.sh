@@ -15,5 +15,8 @@ set +a
 
 : "${DATABASE_URL:?DATABASE_URL ausente no .env}"
 : "${OIDC_ISSUER_URL:?OIDC_ISSUER_URL ausente no .env}"
+: "${SQS_WAGER_QUEUE_URL:?SQS_WAGER_QUEUE_URL ausente no .env}"
+: "${SQS_WAGER_DLQ_URL:?SQS_WAGER_DLQ_URL ausente no .env}"
+: "${SQS_DOMAIN_EVENTS_QUEUE_URL:?SQS_DOMAIN_EVENTS_QUEUE_URL ausente no .env}"
 
 exec go run ./cmd/server

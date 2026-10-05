@@ -17,10 +17,10 @@ func NewWagerHandlerForTest(uc wagerService) *WagerHandler {
 	return &WagerHandler{uc: uc}
 }
 
-// NewHealthHandlerForTest returns a health handler without a live DB.
+// NewHealthHandlerForTest returns a health handler without a live DB/SQS.
 // Ready is not exercised in unit tests that use this helper.
 func NewHealthHandlerForTest() *HealthHandler {
-	return &HealthHandler{db: &database.DB{}}
+	return &HealthHandler{db: &database.DB{}, sqs: nil}
 }
 
 type stubTokenVerifier struct {

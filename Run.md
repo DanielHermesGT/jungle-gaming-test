@@ -1,13 +1,12 @@
 # Como rodar o projeto
 
-Guia prático: Postgres + Keycloak + API HTTP (Uber Fx).  
-SQS / outbox ainda não estão nesta fase; wagering HTTP já está.
+Guia prático: Postgres + Keycloak + LocalStack (SQS) + API HTTP (Uber Fx) com workers de inbox/outbox.
 
 ## Pré-requisitos
 
 - Go (versão do `go.mod`)
 - Docker + Docker Compose
-- `psql`, `curl` e `jq` (úteis no passo a passo)
+- `psql`, `curl`, `jq` e AWS CLI (úteis no passo a passo / smoke SQS)
 
 ## 1. Subir dependências
 
@@ -16,6 +15,9 @@ docker compose up -d
 docker compose exec postgres pg_isready -U jungle -d jungle
 # Keycloak: aguarde o realm (pode levar ~1 min na 1ª subida)
 curl -sf http://localhost:8081/realms/jungle >/dev/null && echo keycloak_ok
+# LocalStack: filas criadas por deploy/localstack/init-sqs.sh
+curl -sf http://localhost:4566/_localstack/health >/dev/null && echo localstack_ok
+aws --endpoint-url=http://localhost:4566 sqs list-queues
 ```
 
 | Serviço | URL / credenciais |
@@ -23,6 +25,7 @@ curl -sf http://localhost:8081/realms/jungle >/dev/null && echo keycloak_ok
 | Postgres | `postgres://jungle:jungle@localhost:5432/jungle?sslmode=disable` |
 | Keycloak admin | http://localhost:8081 — `admin` / `admin` |
 | Realm | `jungle` (troque no canto superior esquerdo do Admin) |
+| LocalStack SQS | http://localhost:4566 |
 
 ```sh
 docker compose down          # para
@@ -49,6 +52,13 @@ HTTP_ADDR=:8080
 OIDC_ISSUER_URL=http://localhost:8081/realms/jungle
 OIDC_AUDIENCE=jungle-api
 INTERNAL_SERVICE_ROLE=wallet-internal
+AWS_REGION=us-east-1
+AWS_ENDPOINT_URL=http://localhost:4566
+AWS_ACCESS_KEY_ID=test
+AWS_SECRET_ACCESS_KEY=test
+SQS_WAGER_QUEUE_URL=http://localhost:4566/000000000000/wager-transactions.fifo
+SQS_WAGER_DLQ_URL=http://localhost:4566/000000000000/wager-transactions-dlq.fifo
+SQS_DOMAIN_EVENTS_QUEUE_URL=http://localhost:4566/000000000000/domain-events.fifo
 ```
 
 **Carregar no terminal atual** (faça isso sempre antes de `go run` / testes de integração):
@@ -64,13 +74,14 @@ Confira:
 ```sh
 echo "$DATABASE_URL"
 echo "$OIDC_ISSUER_URL"
+echo "$SQS_WAGER_QUEUE_URL"
 ```
 
-Sem `OIDC_ISSUER_URL` / `DATABASE_URL` no ambiente, a API **não sobe**.
+Sem `OIDC_ISSUER_URL` / `DATABASE_URL` / URLs SQS no ambiente, a API **não sobe**.
 
 ## 3. Migrations (obrigatório antes da API / dos curls)
 
-Cria `wallets`, `wallet_ledger_entries` e `wager_transactions` (+ coluna TTL de referência). Sem `000001`, auth pode passar e mesmo assim
+Cria `wallets`, `wallet_ledger_entries`, `wager_transactions`, `outbox_events` e `inbox_messages`. Sem `000001`, auth pode passar e mesmo assim
 `POST /wallets` responde `{"code":"internal_error"}` (relação inexistente no Postgres).
 
 ```sh
@@ -78,142 +89,185 @@ Cria `wallets`, `wallet_ledger_entries` e `wager_transactions` (+ coluna TTL de 
 docker compose exec -T postgres psql -U jungle -d jungle < migrations/000001_wallets_ledger.up.sql
 docker compose exec -T postgres psql -U jungle -d jungle < migrations/000002_wager_transactions.up.sql
 docker compose exec -T postgres psql -U jungle -d jungle < migrations/000003_wager_pending_reference_ttl.up.sql
+docker compose exec -T postgres psql -U jungle -d jungle < migrations/000004_inbox_outbox.up.sql
 
 # ou, com psql local + .env carregado:
 psql "$DATABASE_URL" -f migrations/000001_wallets_ledger.up.sql
 psql "$DATABASE_URL" -f migrations/000002_wager_transactions.up.sql
 psql "$DATABASE_URL" -f migrations/000003_wager_pending_reference_ttl.up.sql
+psql "$DATABASE_URL" -f migrations/000004_inbox_outbox.up.sql
 ```
 
 Confira:
 
 ```sh
 docker compose exec -T postgres psql -U jungle -d jungle -c '\dt'
-# deve listar wallets, wallet_ledger_entries e wager_transactions
+# wallets, wallet_ledger_entries, wager_transactions, outbox_events, inbox_messages
 ```
 
-Reverter (ordem inversa): `000003` → `000002` → `000001`.
+Reverter (ordem inversa): `000004` → `000003` → `000002` → `000001`.
 
-O use case `wager.Process` já existe internamente; rota HTTP `/wagering` ainda não.
+## 4. Smoke HTTP — dois terminais (ordem fixa)
 
-## 4. Subir a API
+Use **sempre o mesmo Terminal B** para todos os `curl` (variáveis `$TOKEN`, `$WID`, `$PID` não passam de um shell para outro).
 
-Opção A — script (carrega `.env` e roda):
+| Client | Secret | `/wallets*` | `/wagering*` |
+| --- | --- | --- | --- |
+| `jungle-internal` | `jungle-internal-secret` | ok (role) | **403** (sem `provider_id`) |
+| `provider-a` | `provider-a-secret` | **403** | ok (`provider_id`) |
+
+### Terminal A — sobe a API e deixa rodando
 
 ```sh
+cd /home/daniel/Desktop/git/jungle-gaming-test
+
+docker compose up -d
+curl -sf http://localhost:8081/realms/jungle >/dev/null && echo keycloak_ok
+
+# se banco novo / down -v: rode as 3 migrations do passo 3
+
 ./scripts/run-api.sh
+# espere: [Fx] RUNNING  (sem "address already in use")
 ```
 
-Opção B — manual (no mesmo terminal onde rodou `source .env`):
+Não feche este terminal.
+
+---
+
+### Terminal B — requests (cole bloco a bloco, na ordem)
+
+**B1 — health**
 
 ```sh
-go run ./cmd/server
+cd /home/daniel/Desktop/git/jungle-gaming-test
+
+curl -s localhost:8080/health/live
+curl -s localhost:8080/health/ready
+# {"status":"ok"} / {"status":"ready"}
 ```
 
-Deixe esse processo rodando. Use **outro terminal** para os `curl` abaixo  
-(lá o `$TOKEN` vive; a API não precisa do token no ambiente).
-
-### 4.1 Token interno (`client_credentials`)
+**B2 — token interno + abrir carteira**
 
 ```sh
 TOKEN=$(curl -s -X POST 'http://localhost:8081/realms/jungle/protocol/openid-connect/token' \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
   -d 'grant_type=client_credentials' \
   -d 'client_id=jungle-internal' \
   -d 'client_secret=jungle-internal-secret' | jq -r .access_token)
 
-# obrigatório: tem que aparecer wallet-internal (senão a API devolve 403)
-echo "$TOKEN" | cut -d. -f2 | python3 -c '
-import sys, base64, json
-s = sys.stdin.read().strip()
-s += "=" * (-len(s) % 4)
-print(json.dumps(json.loads(base64.urlsafe_b64decode(s)), indent=2))
-'
-```
+# playerId único a cada teste (evita 409 se já abriu antes)
+PLAYER_ID="0192f28f-5dc0-7d58-bdb2-$(date +%s | tail -c 13)"
 
-No JSON decodificado, confira:
-
-- `"aud"` contém `jungle-api`
-- `"realm_access": { "roles": [ ..., "wallet-internal", ... ] }`
-
-| Client | Secret | `/wallets*` | `/wagering*` |
-| --- | --- | --- | --- |
-| `jungle-internal` | `jungle-internal-secret` | permitido (com role) | **403** (sem `provider_id`) |
-| `provider-a` | `provider-a-secret` | **403** | permitido (claim `provider_id`) |
-
-### 4.2 Chamadas
-
-```sh
-curl -s localhost:8080/health/live
-curl -s localhost:8080/health/ready
-
-curl -s -X POST localhost:8080/wallets \
+RESP=$(curl -s -X POST localhost:8080/wallets \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","initialBalance":{"amount":"1000.00","currency":"BRL"}}'
+  -d "{\"playerId\":\"$PLAYER_ID\",\"initialBalance\":{\"amount\":\"1000.00\",\"currency\":\"BRL\"}}")
+
+echo "$RESP" | jq
+
+WID=$(echo "$RESP" | jq -r .id)
+PID=$(echo "$RESP" | jq -r .playerId)
+
+echo "WID=$WID"
+echo "PID=$PID"
+# os dois precisam ser UUID/string não vazia — se WID=null, a abertura falhou
 ```
 
-Substitua `:id` pelo `id` da resposta:
+**B3 — ler carteira / ledger / reconciliação (ainda com `$TOKEN` interno)**
 
 ```sh
-curl -s localhost:8080/wallets/:id -H "Authorization: Bearer $TOKEN"
-curl -s "localhost:8080/wallets/:id/ledger?limit=50" -H "Authorization: Bearer $TOKEN"
-curl -s -X POST localhost:8080/wallets/:id/reconciliation -H "Authorization: Bearer $TOKEN"
+curl -s "localhost:8080/wallets/$WID" -H "Authorization: Bearer $TOKEN" | jq
+curl -s "localhost:8080/wallets/$WID/ledger?limit=50" -H "Authorization: Bearer $TOKEN" | jq
+curl -s -X POST "localhost:8080/wallets/$WID/reconciliation" -H "Authorization: Bearer $TOKEN" | jq
 ```
 
-Sem token → `401`. Token de `provider-a` → `403` em `/wallets*`.
-
-| Resposta | Causa comum |
-| --- | --- |
-| `401` unauthorized | sem Bearer / token inválido ou expirado |
-| `403` forbidden / `internal service role required` | token ok, mas sem role `wallet-internal` |
-| `500` internal_error | migration não aplicada (`wallets` inexistente) — volte ao passo 3 |
-| `409` conflict | já existe carteira para o mesmo `playerId` + moeda |
-
-No log da API, tabela faltando aparece como `relation "wallets" does not exist`.
-
-### 4.3 Wagering (token do provedor)
-
-Abra a carteira com `$TOKEN` interno (passo 4.2) e guarde o `id` da wallet. Depois:
+**B4 — token do provedor + BET**
 
 ```sh
 PROVIDER_TOKEN=$(curl -s -X POST 'http://localhost:8081/realms/jungle/protocol/openid-connect/token' \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
   -d 'grant_type=client_credentials' \
   -d 'client_id=provider-a' \
   -d 'client_secret=provider-a-secret' | jq -r .access_token)
 
-# confira claim provider_id == provider-a no decode do JWT
+# confira: WID e PID ainda preenchidos neste mesmo terminal
+echo "WID=$WID PID=$PID"
+
+EXT_ID="transaction-$(date +%s)"
+
+BET=$(curl -s -X POST localhost:8080/wagering/transactions \
+  -H "Authorization: Bearer $PROVIDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: provider-a:$EXT_ID" \
+  -d "{
+    \"providerId\":\"provider-a\",
+    \"externalTransactionId\":\"$EXT_ID\",
+    \"playerId\":\"$PID\",
+    \"walletId\":\"$WID\",
+    \"roundId\":\"round-987\",
+    \"gameId\":\"fortune-chimp\",
+    \"kind\":\"BET\",
+    \"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}
+  }")
+
+echo "$BET" | jq
+TID=$(echo "$BET" | jq -r .transactionId)
+echo "TID=$TID EXT_ID=$EXT_ID"
 ```
 
+Esperado no BET: `"status":"PROCESSED"`, `"balance":{"amount":"975.00",...}`, `idempotentReplay: false`.
+
+**B5 — consultar wager + saldo depois da aposta**
+
 ```sh
-# substitua WALLET_ID e PLAYER_ID pelos valores da abertura
+curl -s "localhost:8080/wagering/transactions/$TID" \
+  -H "Authorization: Bearer $PROVIDER_TOKEN" | jq
+
+curl -s "localhost:8080/providers/provider-a/wagering/transactions/$EXT_ID" \
+  -H "Authorization: Bearer $PROVIDER_TOKEN" | jq
+
+curl -s "localhost:8080/wallets/$WID" \
+  -H "Authorization: Bearer $TOKEN" | jq
+# balance amount deve ser 975.00
+```
+
+**B6 — checagens rápidas de auth (opcional)**
+
+```sh
+# 401 sem token
+curl -si localhost:8080/wallets | head -1
+
+# 403: provedor em /wallets*
+curl -si -X POST localhost:8080/wallets \
+  -H "Authorization: Bearer $PROVIDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"playerId":"x","initialBalance":{"amount":"0.00","currency":"BRL"}}' | head -1
+
+# replay: mesmo Idempotency-Key + mesmo body → idempotentReplay true
 curl -s -X POST localhost:8080/wagering/transactions \
   -H "Authorization: Bearer $PROVIDER_TOKEN" \
   -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: provider-a:transaction-123' \
-  -d '{
-    "providerId":"provider-a",
-    "externalTransactionId":"transaction-123",
-    "playerId":"PLAYER_ID",
-    "walletId":"WALLET_ID",
-    "roundId":"round-987",
-    "gameId":"fortune-chimp",
-    "kind":"BET",
-    "money":{"amount":"25.00","currency":"BRL"}
-  }'
-
-curl -s localhost:8080/wagering/transactions/TRANSACTION_ID \
-  -H "Authorization: Bearer $PROVIDER_TOKEN"
-
-curl -s localhost:8080/providers/provider-a/wagering/transactions/transaction-123 \
-  -H "Authorization: Bearer $PROVIDER_TOKEN"
+  -H "Idempotency-Key: provider-a:$EXT_ID" \
+  -d "{
+    \"providerId\":\"provider-a\",
+    \"externalTransactionId\":\"$EXT_ID\",
+    \"playerId\":\"$PID\",
+    \"walletId\":\"$WID\",
+    \"roundId\":\"round-987\",
+    \"gameId\":\"fortune-chimp\",
+    \"kind\":\"BET\",
+    \"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}
+  }" | jq
 ```
 
-`Idempotency-Key` é obrigatório no POST. Mesmo key+body → replay (`idempotentReplay: true`).  
-`REJECTED` / `PENDING_REFERENCE` também respondem **200** com `status` no JSON.
+| Resposta | Causa comum |
+| --- | --- |
+| `401` | sem Bearer / token inválido ou expirado |
+| `403` em `/wallets*` | token sem role `wallet-internal` (ex.: provedor) |
+| `403` em `/wagering*` | token sem `provider_id` (ex.: interno) |
+| `400` `player/wallet/round/game` | `$PID` ou `$WID` vazios (mudou de terminal) |
+| `500` | migration não aplicada |
+| `409` | mesma carteira (player+moeda) ou conflito de idempotência |
 
-### 4.4 Se o decode do token NÃO tiver `wallet-internal`
+### Se o token interno NÃO tiver `wallet-internal`
 
 O realm antigo no container não pega mudança do JSON sozinho. Recrie o Keycloak:
 
@@ -230,24 +284,68 @@ Ajuste manual no Admin (realm `jungle`):
 1. Clients → `jungle-internal` → **Service account roles** → Assign `wallet-internal`
 2. Clients → `jungle-internal` → **Client scopes** → Default → garanta `roles` e `jungle-audience`
 
-## 5. Testes
+## 5. Publicar wager via SQS (smoke)
+
+Com a API rodando (consumer ativo) e `$WID` / `$PID` do passo B2:
 
 ```sh
-set -a && source .env && set +a   # se for rodar integração com Postgres
+set -a && source .env && set +a
+
+MSG_ID="msg-$(date +%s)"
+EXT_ID="sqs-tx-$(date +%s)"
+BODY=$(jq -n \
+  --arg mid "$MSG_ID" \
+  --arg ext "$EXT_ID" \
+  --arg pid "$PID" \
+  --arg wid "$WID" \
+  '{
+    messageId: $mid,
+    type: "WagerTransactionRequested",
+    occurredAt: "2026-10-04T12:00:00.000Z",
+    data: {
+      providerId: "provider-a",
+      externalTransactionId: $ext,
+      idempotencyKey: ("provider-a:" + $ext),
+      playerId: $pid,
+      walletId: $wid,
+      roundId: "round-sqs",
+      gameId: "fortune-chimp",
+      kind: "BET",
+      money: { amount: "10.00", currency: "BRL" }
+    }
+  }')
+
+aws --endpoint-url="$AWS_ENDPOINT_URL" sqs send-message \
+  --queue-url "$SQS_WAGER_QUEUE_URL" \
+  --message-body "$BODY" \
+  --message-group-id "$WID" \
+  --message-deduplication-id "provider-a:$EXT_ID"
+
+# após alguns segundos: saldo debitado; eventos em domain-events.fifo
+aws --endpoint-url="$AWS_ENDPOINT_URL" sqs receive-message \
+  --queue-url "$SQS_DOMAIN_EVENTS_QUEUE_URL" \
+  --max-number-of-messages 5 \
+  --wait-time-seconds 5 | jq
+```
+
+HTTP curls do passo 4 permanecem inalterados (mesmo `Process`).
+
+## 6. Testes
+
+```sh
+set -a && source .env && set +a
 
 # unitários (sem Docker)
 go test ./internal/domain/... ./internal/auth/... ./internal/web/... ./internal/app/... -race
 
-# integração Postgres
+# integração Postgres (inbox/outbox/use cases)
 go test ./internal/database/ ./internal/usecase/wallet/ ./internal/usecase/wager/ -v -count=1
+
+# integração LocalStack (skip se sem endpoint)
+go test ./internal/messaging/ -v -count=1
 
 go test ./... -race
 go vet ./...
 ```
-
-## O que ainda não roda
-
-- LocalStack / filas SQS / inbox / outbox
-- Worker de `PENDING_REFERENCE` (use case `ResumePendingReference` já existe)
 
 Decisões: `ARCHITECTURE.md`. Enunciado: `README.md`.
