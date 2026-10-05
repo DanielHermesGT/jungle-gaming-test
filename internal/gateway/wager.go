@@ -23,6 +23,8 @@ type WagerRepository interface {
 	GetByProviderExternal(ctx context.Context, q Querier, providerID, externalTxID string) (wager.Transaction, error)
 	// GetProcessedReversal busca reversão PROCESSED do mesmo kind para a referência (anti-duplicata).
 	GetProcessedReversal(ctx context.Context, q Querier, providerID, referenceExternalID string, kind wager.Kind) (wager.Transaction, error)
-	// ListPendingReferenceDue lista PENDING_REFERENCE com TTL vencido (worker futuro).
+	// ListPendingReferenceDue lista PENDING_REFERENCE com TTL vencido.
 	ListPendingReferenceDue(ctx context.Context, q Querier, now time.Time, limit int) ([]wager.Transaction, error)
+	// ListPendingReference lista PENDING_REFERENCE para o worker tentar Resume (antes ou após TTL).
+	ListPendingReference(ctx context.Context, q Querier, limit int) ([]wager.Transaction, error)
 }
