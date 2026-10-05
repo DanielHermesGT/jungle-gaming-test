@@ -366,7 +366,8 @@ Saída (publisher): `MessageGroupId` = `aggregateId`; `MessageDeduplicationId` =
 
 ### Limitações / interpretações
 
-- Métricas: contadores in-process em `GET /metrics` (status, replays, conflitos, DLQ, outbox, divergência de reconcile); logs JSON via `slog` no boot.
+- Métricas: contadores in-process em `GET /metrics` (status, replays, conflitos, DLQ, outbox, divergência de reconcile, `process_latency_ms_*`, `outbox_lag_ms_*`); logs JSON via `slog` no boot.
+- HTTP: middleware gera/propaga `X-Correlation-Id` e loga method/path/status/latencyMs; handlers de wager/wallet acrescentam `providerId` / `walletId` / `transactionId`.
 - Status `FAILED` existe no domínio para falha de infra; o caminho feliz atual usa `REJECTED` / `PENDING_REFERENCE` / `PROCESSED`. Falhas transitórias de I/O propagam erro sem marcar a tx.
 - Worker de `PENDING_REFERENCE` usa TTL 15m + backoff exponencial por id em memória (reinício reprocessa imediatamente).
 - Tracing OTel e load test ficam fora (diferenciais).

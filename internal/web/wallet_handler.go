@@ -3,11 +3,13 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/money"
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/observability"
 	usecasewallet "github.com/DanielHermesGT/jungle-gaming-test/internal/usecase/wallet"
 )
 
@@ -90,6 +92,11 @@ func (h *WalletHandler) Open(w http.ResponseWriter, r *http.Request) {
 		mapUseCaseError(w, err)
 		return
 	}
+	slog.Info("wallet opened",
+		"correlationId", observability.CorrelationID(r.Context()),
+		"walletId", out.ID,
+		"playerId", out.PlayerID,
+	)
 	writeJSON(w, http.StatusCreated, walletViewResponse(out))
 }
 

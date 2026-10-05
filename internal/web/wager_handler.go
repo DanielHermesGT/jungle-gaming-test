@@ -3,12 +3,14 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/auth"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/money"
 	domainwager "github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wager"
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/observability"
 	usecasewager "github.com/DanielHermesGT/jungle-gaming-test/internal/usecase/wager"
 )
 
@@ -117,6 +119,7 @@ func (h *WagerHandler) Process(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	start := time.Now()
 	out, err := h.uc.Process(r.Context(), usecasewager.ProcessInput{
 		ProviderID:                     req.ProviderID,
 		ExternalTransactionID:          req.ExternalTransactionID,
@@ -130,10 +133,27 @@ func (h *WagerHandler) Process(w http.ResponseWriter, r *http.Request) {
 		ReferenceExternalTransactionID: req.ReferenceExternalTransactionID,
 		PayloadHash:                    hash,
 	})
+	observability.ObserveProcessLatency(time.Since(start))
 	if err != nil {
+		slog.Warn("wager process failed",
+			"correlationId", observability.CorrelationID(r.Context()),
+			"providerId", req.ProviderID,
+			"walletId", req.WalletID,
+			"err", err.Error(),
+		)
 		mapUseCaseError(w, err)
 		return
 	}
+
+	slog.Info("wager process completed",
+		"correlationId", observability.CorrelationID(r.Context()),
+		"providerId", req.ProviderID,
+		"walletId", req.WalletID,
+		"transactionId", out.Transaction.ID(),
+		"status", string(out.Transaction.Status()),
+		"idempotentReplay", out.IdempotentReplay,
+		"latencyMs", time.Since(start).Milliseconds(),
+	)
 
 	resp := processWagerResponse{
 		TransactionID:    out.Transaction.ID(),
@@ -165,6 +185,12 @@ func (h *WagerHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden", "provider not authorized")
 		return
 	}
+	slog.Info("wager get",
+		"correlationId", observability.CorrelationID(r.Context()),
+		"providerId", p.ProviderID,
+		"transactionId", tx.ID(),
+		"walletId", tx.WalletID(),
+	)
 	writeJSON(w, http.StatusOK, wagerViewResponse(tx))
 }
 

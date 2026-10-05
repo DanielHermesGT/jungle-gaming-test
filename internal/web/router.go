@@ -27,5 +27,5 @@ func NewRouter(wallets *WalletHandler, wagers *WagerHandler, health *HealthHandl
 		mw.ProtectProviderPath("providerId", http.HandlerFunc(wagers.GetByExternal)),
 	)
 
-	return mux
+	return withRequestLog(mux)
 }

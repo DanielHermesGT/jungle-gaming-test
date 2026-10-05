@@ -102,8 +102,16 @@ func (c *Consumer) handle(ctx context.Context, msg types.Message) {
 		return
 	}
 
+	start := time.Now()
 	_, err = c.uc.ProcessFromQueue(ctx, ConsumerWagerTransactions, parsed.MessageID, parsed.PayloadHash, parsed.Input)
+	observability.ObserveProcessLatency(time.Since(start))
 	if err == nil {
+		slog.Info("sqs wager processed",
+			"messageId", parsed.MessageID,
+			"providerId", parsed.Input.ProviderID,
+			"walletId", parsed.Input.WalletID,
+			"latencyMs", time.Since(start).Milliseconds(),
+		)
 		c.delete(ctx, receipt)
 		return
 	}

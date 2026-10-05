@@ -35,6 +35,8 @@ curl -sf http://localhost:8080/metrics
 curl -sf http://localhost:8081/realms/jungle >/dev/null && echo keycloak_ok
 ```
 
+Logs JSON no stdout: cada request HTTP recebe/propaga `X-Correlation-Id`; handlers de wager logam `providerId`, `walletId`, `transactionId`. Em `/metrics` há também `process_latency_ms_*` e `outbox_lag_ms_*`.
+
 ## Variáveis de ambiente
 
 Ver [`.env.example`](.env.example). Obrigatórias para a API: `DATABASE_URL`, `OIDC_ISSUER_URL`, `SQS_WAGER_QUEUE_URL`, `SQS_WAGER_DLQ_URL`, `SQS_DOMAIN_EVENTS_QUEUE_URL`.

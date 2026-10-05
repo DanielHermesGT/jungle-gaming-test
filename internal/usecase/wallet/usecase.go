@@ -265,7 +265,6 @@ func (uc *UseCase) ListLedger(ctx context.Context, in ListLedgerInput) (ListLedg
 }
 
 // Reconcile compara saldo armazenado com a reconstrução do ledger. Não altera saldo.
-// TODO(futuro): métrica de divergência (README §12).
 func (uc *UseCase) Reconcile(ctx context.Context, walletID string) (ReconcileOutput, error) {
 	if walletID == "" {
 		return ReconcileOutput{}, fmt.Errorf("%w: walletId", usecase.ErrInvalidInput)
@@ -326,6 +325,7 @@ func (uc *UseCase) Reconcile(ctx context.Context, walletID string) (ReconcileOut
 	if !out.Consistent {
 		observability.ReconcileDivergences.Add(1)
 		slog.Warn("wallet reconciliation inconsistent",
+			"correlationId", observability.CorrelationID(ctx),
 			"walletId", out.WalletID,
 			"checkedEntries", out.CheckedEntries,
 		)

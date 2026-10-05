@@ -112,6 +112,18 @@ func (p *Publisher) publishOnce(ctx context.Context) (int, error) {
 			return p.outbox.MarkPublished(ctx, q, rec.ID, p.clock.Now().UTC())
 		})
 		observability.OutboxPublished.Add(1)
+		occurred := rec.OccurredAt
+		if occurred.IsZero() {
+			occurred = rec.CreatedAt
+		}
+		lag := now.Sub(occurred.UTC())
+		observability.ObserveOutboxLag(lag)
+		slog.Info("outbox published",
+			"eventId", rec.ID,
+			"eventType", rec.EventType,
+			"aggregateId", rec.AggregateID,
+			"outboxLagMs", lag.Milliseconds(),
+		)
 	}
 	return len(claimed), nil
 }
