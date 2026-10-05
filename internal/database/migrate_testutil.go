@@ -18,7 +18,7 @@ func OpenTestDB(t *testing.T) *DB {
 	ctx := context.Background()
 	db, err := NewDB(ctx, dsn)
 	if err != nil {
-		t.Fatalf("connect: %v", err)
+		t.Skipf("postgres unavailable: %v", err)
 	}
 	t.Cleanup(db.Close)
 	applyMigrations(t, db)
@@ -32,6 +32,7 @@ func applyMigrations(t *testing.T, db *DB) {
 	// Reset schema for isolated repo tests.
 	_, err := db.Pool.Exec(ctx, `
 DROP TABLE IF EXISTS inbox_messages, outbox_events, wager_transactions, wallet_ledger_entries, wallets CASCADE;
+DROP FUNCTION IF EXISTS deny_ledger_mutation();
 `)
 	if err != nil {
 		t.Fatalf("reset schema: %v", err)
@@ -42,6 +43,7 @@ DROP TABLE IF EXISTS inbox_messages, outbox_events, wager_transactions, wallet_l
 		"000002_wager_transactions.up.sql",
 		"000003_wager_pending_reference_ttl.up.sql",
 		"000004_inbox_outbox.up.sql",
+		"000005_ledger_immutable.up.sql",
 	} {
 		upSQL, err := os.ReadFile(migrationPath(name))
 		if err != nil {

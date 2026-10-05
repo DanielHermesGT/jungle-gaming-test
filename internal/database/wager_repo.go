@@ -130,16 +130,23 @@ func (r *WagerRepo) GetProcessedReversal(
 	ctx context.Context,
 	q gateway.Querier,
 	providerID, referenceExternalID string,
-	kind wager.Kind,
+	kinds ...wager.Kind,
 ) (wager.Transaction, error) {
+	if len(kinds) == 0 {
+		kinds = []wager.Kind{wager.KindRefund, wager.KindRollback}
+	}
+	kindStrs := make([]string, len(kinds))
+	for i, k := range kinds {
+		kindStrs[i] = string(k)
+	}
 	sql := `SELECT ` + wagerSelectCols + `
 FROM wager_transactions
 WHERE provider_id = $1
   AND reference_external_transaction_id = $2
-  AND kind = $3
+  AND kind = ANY($3)
   AND status = 'PROCESSED'
 LIMIT 1`
-	return r.scanOne(ctx, q, sql, providerID, referenceExternalID, string(kind))
+	return r.scanOne(ctx, q, sql, providerID, referenceExternalID, kindStrs)
 }
 
 func (r *WagerRepo) ListPendingReferenceDue(

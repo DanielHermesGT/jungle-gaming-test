@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/observability"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/usecase"
 	usecasewager "github.com/DanielHermesGT/jungle-gaming-test/internal/usecase/wager"
 )
@@ -23,6 +25,7 @@ type wagerProcessor interface {
 type Consumer struct {
 	sqs *Client
 	uc  wagerProcessor
+	wg  sync.WaitGroup
 }
 
 func NewConsumer(sqsClient *Client, uc *usecasewager.UseCase) *Consumer {
@@ -31,6 +34,8 @@ func NewConsumer(sqsClient *Client, uc *usecasewager.UseCase) *Consumer {
 
 func (c *Consumer) Run(ctx context.Context) {
 	slog.Info("messaging: sqs consumer started", "queue", c.sqs.wagerQueueURL)
+	c.wg.Add(1)
+	defer c.wg.Done()
 	for {
 		if ctx.Err() != nil {
 			return
@@ -54,8 +59,33 @@ func (c *Consumer) Run(ctx context.Context) {
 			continue
 		}
 		for _, msg := range out.Messages {
-			c.handle(ctx, msg)
+			if ctx.Err() != nil {
+				// Release visibility so another instance can pick up promptly.
+				c.releaseVisibility(context.Background(), aws.ToString(msg.ReceiptHandle))
+				continue
+			}
+			c.wg.Add(1)
+			go func(msg types.Message) {
+				defer c.wg.Done()
+				// Finish in-flight even if parent ctx cancelled (SIGTERM grace).
+				c.handle(context.WithoutCancel(ctx), msg)
+			}(msg)
 		}
+	}
+}
+
+// Wait blocks until the receive loop and in-flight handlers finish.
+func (c *Consumer) Wait(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		c.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -68,6 +98,7 @@ func (c *Consumer) handle(ctx context.Context, msg types.Message) {
 		slog.Warn("messaging: invalid message → DLQ", "err", err)
 		c.sendDLQ(ctx, body, "invalid:"+err.Error())
 		c.delete(ctx, receipt)
+		observability.SQSDLQ.Add(1)
 		return
 	}
 
@@ -79,12 +110,23 @@ func (c *Consumer) handle(ctx context.Context, msg types.Message) {
 
 	switch {
 	case errors.Is(err, usecase.ErrPermanent), errors.Is(err, usecase.ErrInvalidInput), errors.Is(err, usecase.ErrConflict):
-		slog.Warn("messaging: permanent failure → DLQ", "messageId", parsed.MessageID, "err", err)
+		slog.Warn("messaging: permanent failure → DLQ",
+			"messageId", parsed.MessageID,
+			"providerId", parsed.Input.ProviderID,
+			"walletId", parsed.Input.WalletID,
+			"err", err,
+		)
 		c.sendDLQ(ctx, body, truncateErr(err))
 		c.delete(ctx, receipt)
+		observability.SQSDLQ.Add(1)
 	default:
-		// Transient: leave for visibility timeout retry. Do not log financial payload.
-		slog.Error("messaging: transient failure", "messageID", parsed.MessageID, "err", err)
+		slog.Error("messaging: transient failure",
+			"messageId", parsed.MessageID,
+			"providerId", parsed.Input.ProviderID,
+			"walletId", parsed.Input.WalletID,
+			"err", err,
+		)
+		observability.SQSTransientErrors.Add(1)
 	}
 }
 
@@ -101,6 +143,20 @@ func (c *Consumer) delete(ctx context.Context, receipt string) {
 	}
 }
 
+func (c *Consumer) releaseVisibility(ctx context.Context, receipt string) {
+	if receipt == "" {
+		return
+	}
+	_, err := c.sqs.api.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
+		QueueUrl:          aws.String(c.sqs.wagerQueueURL),
+		ReceiptHandle:     aws.String(receipt),
+		VisibilityTimeout: 0,
+	})
+	if err != nil {
+		slog.Warn("messaging: release visibility failed", "err", err)
+	}
+}
+
 func (c *Consumer) sendDLQ(ctx context.Context, body, reason string) {
 	_, err := c.sqs.api.SendMessage(ctx, &sqs.SendMessageInput{
 		QueueUrl:               aws.String(c.sqs.wagerDLQURL),
@@ -114,7 +170,5 @@ func (c *Consumer) sendDLQ(ctx context.Context, body, reason string) {
 }
 
 func fmtHash(s string) string {
-	// Dedup id max 128 chars; use sha256 hex.
-	sum := sha256Hex([]byte(s))
-	return sum
+	return sha256Hex([]byte(s))
 }

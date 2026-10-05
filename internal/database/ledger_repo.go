@@ -11,8 +11,7 @@ import (
 
 // LedgerRepo persists wallet ledger entries.
 //
-// Append-only — proibido Update/Delete de lançamentos (README §6.4).
-// TODO(futuro): callers devem incluir inbox/outbox/wager na mesma Tx que Insert ledger.
+// Append-only — proibido Update/Delete de lançamentos (README §6.4); trigger SQL reforça.
 type LedgerRepo struct{}
 
 func NewLedgerRepo() *LedgerRepo {

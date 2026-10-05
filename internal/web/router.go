@@ -13,6 +13,7 @@ func NewRouter(wallets *WalletHandler, wagers *WagerHandler, health *HealthHandl
 
 	mux.HandleFunc("GET /health/live", health.Live)
 	mux.HandleFunc("GET /health/ready", health.Ready)
+	mux.HandleFunc("GET /metrics", health.Metrics)
 
 	mux.Handle("POST /wallets", mw.ProtectInternal(http.HandlerFunc(wallets.Open)))
 	mux.Handle("GET /wallets/{walletId}", mw.ProtectInternal(http.HandlerFunc(wallets.Get)))

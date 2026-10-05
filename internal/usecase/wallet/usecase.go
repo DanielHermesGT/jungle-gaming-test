@@ -14,6 +14,7 @@ import (
 	domainwager "github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wager"
 	domainwallet "github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wallet"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/gateway"
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/observability"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/usecase"
 	"github.com/DanielHermesGT/jungle-gaming-test/pkg/clock"
 	"github.com/DanielHermesGT/jungle-gaming-test/pkg/idgen"
@@ -323,6 +324,7 @@ func (uc *UseCase) Reconcile(ctx context.Context, walletID string) (ReconcileOut
 	}
 
 	if !out.Consistent {
+		observability.ReconcileDivergences.Add(1)
 		slog.Warn("wallet reconciliation inconsistent",
 			"walletId", out.WalletID,
 			"checkedEntries", out.CheckedEntries,

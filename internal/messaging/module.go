@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"context"
+	"time"
 
 	"go.uber.org/fx"
 )
@@ -19,10 +20,10 @@ var Module = fx.Module("messaging",
 
 type workerParams struct {
 	fx.In
-	LC       fx.Lifecycle
-	Consumer *Consumer
+	LC        fx.Lifecycle
+	Consumer  *Consumer
 	Publisher *Publisher
-	Pending  *PendingRefWorker
+	Pending   *PendingRefWorker
 }
 
 func registerWorkers(p workerParams) {
@@ -34,8 +35,20 @@ func registerWorkers(p workerParams) {
 			go p.Pending.Run(ctx)
 			return nil
 		},
-		OnStop: func(context.Context) error {
+		OnStop: func(stopCtx context.Context) error {
 			cancel()
+			// Finish in-flight work within Fx stop deadline (or 25s).
+			deadline := 25 * time.Second
+			if dl, ok := stopCtx.Deadline(); ok {
+				if rem := time.Until(dl); rem > 0 && rem < deadline {
+					deadline = rem
+				}
+			}
+			waitCtx, waitCancel := context.WithTimeout(context.Background(), deadline)
+			defer waitCancel()
+			_ = p.Consumer.Wait(waitCtx)
+			_ = p.Publisher.Wait(waitCtx)
+			_ = p.Pending.Wait(waitCtx)
 			return nil
 		},
 	})

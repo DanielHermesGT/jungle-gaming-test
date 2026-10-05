@@ -81,7 +81,7 @@ Sem `OIDC_ISSUER_URL` / `DATABASE_URL` / URLs SQS no ambiente, a API **não sobe
 
 ## 3. Migrations (obrigatório antes da API / dos curls)
 
-Cria `wallets`, `wallet_ledger_entries`, `wager_transactions`, `outbox_events` e `inbox_messages`. Sem `000001`, auth pode passar e mesmo assim
+Cria `wallets`, `wallet_ledger_entries`, `wager_transactions`, `outbox_events`, `inbox_messages` e trigger de ledger imutável. Sem `000001`, auth pode passar e mesmo assim
 `POST /wallets` responde `{"code":"internal_error"}` (relação inexistente no Postgres).
 
 ```sh
@@ -90,12 +90,14 @@ docker compose exec -T postgres psql -U jungle -d jungle < migrations/000001_wal
 docker compose exec -T postgres psql -U jungle -d jungle < migrations/000002_wager_transactions.up.sql
 docker compose exec -T postgres psql -U jungle -d jungle < migrations/000003_wager_pending_reference_ttl.up.sql
 docker compose exec -T postgres psql -U jungle -d jungle < migrations/000004_inbox_outbox.up.sql
+docker compose exec -T postgres psql -U jungle -d jungle < migrations/000005_ledger_immutable.up.sql
 
 # ou, com psql local + .env carregado:
 psql "$DATABASE_URL" -f migrations/000001_wallets_ledger.up.sql
 psql "$DATABASE_URL" -f migrations/000002_wager_transactions.up.sql
 psql "$DATABASE_URL" -f migrations/000003_wager_pending_reference_ttl.up.sql
 psql "$DATABASE_URL" -f migrations/000004_inbox_outbox.up.sql
+psql "$DATABASE_URL" -f migrations/000005_ledger_immutable.up.sql
 ```
 
 Confira:
@@ -105,7 +107,7 @@ docker compose exec -T postgres psql -U jungle -d jungle -c '\dt'
 # wallets, wallet_ledger_entries, wager_transactions, outbox_events, inbox_messages
 ```
 
-Reverter (ordem inversa): `000004` → `000003` → `000002` → `000001`.
+Reverter (ordem inversa): `000005` → `000004` → `000003` → `000002` → `000001`.
 
 ## 4. Smoke HTTP — dois terminais (ordem fixa)
 

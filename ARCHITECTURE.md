@@ -82,7 +82,7 @@ Erros sentinela classificáveis com `errors.Is`:
 | `0.00` | Wallet com `version = 1`, sem lançamento de ledger |
 | `> 0` | Wallet com `version = 1` + um `CREDIT` de abertura no ledger (`balanceBefore = 0`) |
 
-O domínio wallet materializa saldo + ledger de abertura. `wallet.Open` (use case) com saldo > 0 também persiste `wager.Transaction` OPENING (`PROCESSED`) na mesma TX. Eventos de outbox da abertura ainda são TODO.
+O domínio wallet materializa saldo + ledger de abertura. `wallet.Open` (use case) com saldo > 0 também persiste `wager.Transaction` OPENING (`PROCESSED`) e outbox (`WagerTransactionProcessed` + `WalletBalanceChanged`) na mesma TX.
 
 ### Ledger
 
@@ -92,7 +92,7 @@ O domínio wallet materializa saldo + ledger de abertura. `wallet.Open` (use cas
 - `balanceAfter = balanceBefore ± amount` (validado na construção)
 - vínculo a `walletId` e `transactionId`
 
-`LOSS` e rejeições (ainda não modelados aqui) não devem chamar `Credit`/`Debit`.
+`LOSS` e rejeições não chamam `Credit`/`Debit`.
 
 Movimentos exigem amount **> 0** e a mesma moeda da carteira. Débito com saldo insuficiente retorna `ErrInsufficientFunds` sem alterar o agregado.
 
@@ -148,11 +148,11 @@ BEGIN
   -- INSERT/UPDATE wallet
   -- INSERT ledger (sempre junto com mudança de saldo)
   -- INSERT/UPDATE wager_transaction (OPENING / Process)
-  -- TODO(futuro): inbox / outbox na MESMA TX
+  -- INSERT inbox (entrada SQS) / outbox_events (sempre na mesma TX)
 COMMIT
 ```
 
-Wallet + ledger + wager da mesma operação financeira **nunca** em commits separados. Inbox/outbox entram neste mesmo `BEGIN…COMMIT` quando existirem.
+Wallet + ledger + wager + inbox/outbox da mesma operação financeira **nunca** em commits separados.
 
 #### Constraints (fonte da verdade no DB)
 
@@ -161,7 +161,7 @@ Wallet + ledger + wager da mesma operação financeira **nunca** em commits sepa
 | `UNIQUE (player_id, currency)` | `wallets` | uma carteira por jogador+moeda |
 | `UNIQUE (wallet_id, transaction_id)` | `wallet_ledger_entries` | um lançamento por transação na carteira |
 | `CHECK (balance_minor >= 0)` | `wallets` | impede saldo negativo no banco |
-| Ledger append-only | repo | só `INSERT`; sem `UPDATE`/`DELETE` de lançamentos |
+| Ledger append-only | DB trigger + repo | só `INSERT`; trigger impede `UPDATE`/`DELETE` (`000005`) |
 
 ### Persistência
 
@@ -357,6 +357,19 @@ Saída (publisher): `MessageGroupId` = `aggregateId`; `MessageDeduplicationId` =
 | PendingRef | lista `PENDING_REFERENCE` → `ResumePendingReference` |
 
 `ProcessFromQueue`: inbox completed → replay (ack); hash mismatch → `ErrPermanent` (DLQ); `PENDING_REFERENCE` completa a inbox (worker de refs continua).
+
+### Política REFUND + ROLLBACK (README §7)
+
+- Duplicata do **mesmo kind** (dois REFUND ou dois ROLLBACK da mesma referência) → `DUPLICATE_REVERSAL`.
+- Sobre a **mesma BET**: REFUND e ROLLBACK são mutuamente exclusivos — ambos creditam o débito original; o segundo em `PROCESSED` é rejeitado com `DUPLICATE_REVERSAL`.
+- `ROLLBACK` de um `WIN` ou de um `REFUND` já processado debita (desfaz o crédito); não conflita com a política acima porque a referência não é a BET.
+
+### Limitações / interpretações
+
+- Métricas: contadores in-process em `GET /metrics` (status, replays, conflitos, DLQ, outbox, divergência de reconcile); logs JSON via `slog` no boot.
+- Status `FAILED` existe no domínio para falha de infra; o caminho feliz atual usa `REJECTED` / `PENDING_REFERENCE` / `PROCESSED`. Falhas transitórias de I/O propagam erro sem marcar a tx.
+- Worker de `PENDING_REFERENCE` usa TTL 15m + backoff exponencial por id em memória (reinício reprocessa imediatamente).
+- Tracing OTel e load test ficam fora (diferenciais).
 
 ## Autenticação e autorização
 

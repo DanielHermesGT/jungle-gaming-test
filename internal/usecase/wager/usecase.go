@@ -10,6 +10,7 @@ import (
 	domainwager "github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wager"
 	domainwallet "github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wallet"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/gateway"
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/observability"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/usecase"
 	"github.com/DanielHermesGT/jungle-gaming-test/pkg/clock"
 	"github.com/DanielHermesGT/jungle-gaming-test/pkg/idgen"
@@ -99,8 +100,12 @@ func (uc *UseCase) Process(ctx context.Context, in ProcessInput) (ProcessResult,
 		return uc.emitForResult(ctx, q, out, ledger, uc.clock.Now().UTC())
 	})
 	if err != nil {
+		if errors.Is(err, usecase.ErrConflict) {
+			observability.Conflicts.Add(1)
+		}
 		return ProcessResult{}, err
 	}
+	recordProcessMetrics(out)
 	return out, nil
 }
 
@@ -164,8 +169,12 @@ func (uc *UseCase) ProcessFromQueue(
 		return uc.inbox.MarkCompleted(ctx, q, consumerName, messageID, now)
 	})
 	if err != nil {
+		if errors.Is(err, usecase.ErrConflict) {
+			observability.Conflicts.Add(1)
+		}
 		return ProcessResult{}, err
 	}
+	recordProcessMetrics(out)
 	return out, nil
 }
 
@@ -389,16 +398,14 @@ func (uc *UseCase) applyReversal(
 		return applyOutcome{tx: rejected}, nil
 	}
 
-	dup, err := uc.wagers.GetProcessedReversal(ctx, q, tx.ProviderID(), tx.ReferenceExternalTransaction(), tx.Kind())
-	if err == nil && dup.ID() != "" {
+	if dup, err := uc.findDuplicateReversal(ctx, q, tx, ref); err != nil {
+		return applyOutcome{}, err
+	} else if dup != nil {
 		rejected, mErr := tx.MarkRejected(domainwager.FailureDuplicateReversal, now)
 		if mErr != nil {
 			return applyOutcome{}, mErr
 		}
 		return applyOutcome{tx: rejected}, nil
-	}
-	if err != nil && !errors.Is(err, gateway.ErrNotFound) {
-		return applyOutcome{}, err
 	}
 
 	resolved, err := tx.ResolveReference(ref.ID(), now)
@@ -434,6 +441,31 @@ func (uc *UseCase) awaitReference(tx domainwager.Transaction, now time.Time) (ap
 		return applyOutcome{}, err
 	}
 	return applyOutcome{tx: pending}, nil
+}
+
+// findDuplicateReversal returns an existing PROCESSED reversal that would double-credit
+// or repeat the same kind. For BET references, REFUND and ROLLBACK are mutually exclusive
+// (both credit the original debit). For WIN/REFUND references, only same-kind ROLLBACK counts.
+func (uc *UseCase) findDuplicateReversal(
+	ctx context.Context,
+	q gateway.Querier,
+	tx, ref domainwager.Transaction,
+) (*domainwager.Transaction, error) {
+	kinds := []domainwager.Kind{tx.Kind()}
+	if ref.Kind() == domainwager.KindBet {
+		kinds = []domainwager.Kind{domainwager.KindRefund, domainwager.KindRollback}
+	}
+	dup, err := uc.wagers.GetProcessedReversal(ctx, q, tx.ProviderID(), tx.ReferenceExternalTransaction(), kinds...)
+	if errors.Is(err, gateway.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if dup.ID() == "" || dup.ID() == tx.ID() {
+		return nil, nil
+	}
+	return &dup, nil
 }
 
 // ResumePendingReference continues or expires a PENDING_REFERENCE transaction.
@@ -499,6 +531,7 @@ func (uc *UseCase) ResumePendingReference(ctx context.Context, wagerID string) (
 	if err != nil {
 		return ProcessResult{}, err
 	}
+	recordProcessMetrics(out)
 	return out, nil
 }
 
@@ -537,16 +570,14 @@ func (uc *UseCase) resumeApply(
 		return applyOutcome{tx: rejected}, nil
 	}
 
-	dup, err := uc.wagers.GetProcessedReversal(ctx, q, tx.ProviderID(), tx.ReferenceExternalTransaction(), tx.Kind())
-	if err == nil && dup.ID() != "" && dup.ID() != tx.ID() {
+	if dup, err := uc.findDuplicateReversal(ctx, q, tx, ref); err != nil {
+		return applyOutcome{}, err
+	} else if dup != nil {
 		rejected, mErr := tx.MarkRejected(domainwager.FailureDuplicateReversal, now)
 		if mErr != nil {
 			return applyOutcome{}, mErr
 		}
 		return applyOutcome{tx: rejected}, nil
-	}
-	if err != nil && !errors.Is(err, gateway.ErrNotFound) {
-		return applyOutcome{}, err
 	}
 
 	resolved, err := tx.ResolveReference(ref.ID(), now)
@@ -650,4 +681,19 @@ func validateReference(tx, ref domainwager.Transaction, requireBet bool) error {
 		return refError{code: domainwager.FailureInvalidAmount}
 	}
 	return nil
+}
+
+func recordProcessMetrics(out ProcessResult) {
+	if out.IdempotentReplay {
+		observability.IdempotentReplays.Add(1)
+		return
+	}
+	switch out.Transaction.Status() {
+	case domainwager.StatusProcessed:
+		observability.WagerProcessed.Add(1)
+	case domainwager.StatusRejected:
+		observability.WagerRejected.Add(1)
+	case domainwager.StatusPendingReference:
+		observability.WagerPendingRef.Add(1)
+	}
 }

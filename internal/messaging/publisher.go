@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/event"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/gateway"
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/observability"
 	"github.com/DanielHermesGT/jungle-gaming-test/pkg/clock"
 	"github.com/DanielHermesGT/jungle-gaming-test/pkg/idgen"
 )
@@ -23,12 +25,13 @@ const (
 
 // Publisher claims outbox rows and publishes them to domain-events.fifo.
 type Publisher struct {
-	db      gateway.DB
-	outbox  gateway.OutboxRepository
-	sqs     *Client
-	ids     idgen.Generator
-	clock   clock.Clock
+	db       gateway.DB
+	outbox   gateway.OutboxRepository
+	sqs      *Client
+	ids      idgen.Generator
+	clock    clock.Clock
 	workerID string
+	wg       sync.WaitGroup
 }
 
 func NewPublisher(
@@ -50,6 +53,8 @@ func NewPublisher(
 
 func (p *Publisher) Run(ctx context.Context) {
 	slog.Info("messaging: outbox publisher started", "workerId", p.workerID)
+	p.wg.Add(1)
+	defer p.wg.Done()
 	for {
 		if ctx.Err() != nil {
 			return
@@ -68,6 +73,21 @@ func (p *Publisher) Run(ctx context.Context) {
 	}
 }
 
+// Wait blocks until Run exits.
+func (p *Publisher) Wait(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (p *Publisher) publishOnce(ctx context.Context) (int, error) {
 	now := p.clock.Now().UTC()
 	var claimed []gateway.OutboxRecord
@@ -82,6 +102,7 @@ func (p *Publisher) publishOnce(ctx context.Context) (int, error) {
 	for _, rec := range claimed {
 		if err := p.publishOne(ctx, rec); err != nil {
 			slog.Warn("messaging: publish failed", "eventId", rec.ID, "eventType", rec.EventType)
+			observability.OutboxRetries.Add(1)
 			_ = p.db.WithinTx(ctx, func(q gateway.Querier) error {
 				return p.outbox.MarkRetry(ctx, q, rec.ID, rec.Attempts, backoffNext(rec.Attempts, now), truncateErr(err))
 			})
@@ -90,6 +111,7 @@ func (p *Publisher) publishOnce(ctx context.Context) (int, error) {
 		_ = p.db.WithinTx(ctx, func(q gateway.Querier) error {
 			return p.outbox.MarkPublished(ctx, q, rec.ID, p.clock.Now().UTC())
 		})
+		observability.OutboxPublished.Add(1)
 	}
 	return len(claimed), nil
 }

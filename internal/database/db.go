@@ -41,8 +41,7 @@ func (db *DB) Querier() gateway.Querier {
 
 // WithinTx runs fn inside a transaction.
 //
-// Alterações de saldo devem persistir wallet + ledger no mesmo Commit.
-// TODO(futuro): estender a mesma Tx para wager_transaction / inbox / outbox.
+// Alterações financeiras (wallet, ledger, wager, inbox, outbox) compartilham o mesmo Commit.
 func (db *DB) WithinTx(ctx context.Context, fn func(q gateway.Querier) error) error {
 	tx, err := db.Pool.Begin(ctx)
 	if err != nil {

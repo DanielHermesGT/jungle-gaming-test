@@ -2,14 +2,18 @@ package wager_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/database"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/domain/money"
 	domainwager "github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wager"
+	domainwallet "github.com/DanielHermesGT/jungle-gaming-test/internal/domain/wallet"
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/gateway"
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/usecase"
 	usecasewager "github.com/DanielHermesGT/jungle-gaming-test/internal/usecase/wager"
 	usecasewallet "github.com/DanielHermesGT/jungle-gaming-test/internal/usecase/wallet"
@@ -137,6 +141,39 @@ func TestRefundPendingReferenceAndResume(t *testing.T) {
 	}
 }
 
+func TestRefundThenRollbackSameBetRejected(t *testing.T) {
+	wuc, guc, _ := newUseCases(t)
+	ctx := context.Background()
+	opened, err := wuc.Open(ctx, usecasewallet.OpenInput{
+		PlayerID: "p-rev", InitialBalance: mustParse(t, "100.00", "BRL"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bet := processIn(t, opened.ID, "p-rev", domainwager.KindBet, "40.00", "bet-rev", "")
+	if _, err := guc.Process(ctx, bet); err != nil {
+		t.Fatal(err)
+	}
+	refund := processIn(t, opened.ID, "p-rev", domainwager.KindRefund, "40.00", "refund-rev", "bet-rev")
+	refOut, err := guc.Process(ctx, refund)
+	if err != nil || refOut.Transaction.Status() != domainwager.StatusProcessed {
+		t.Fatalf("refund=%+v err=%v", refOut, err)
+	}
+	rollback := processIn(t, opened.ID, "p-rev", domainwager.KindRollback, "40.00", "rollback-rev", "bet-rev")
+	rb, err := guc.Process(ctx, rollback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rb.Transaction.Status() != domainwager.StatusRejected ||
+		rb.Transaction.FailureCode() != domainwager.FailureDuplicateReversal {
+		t.Fatalf("want DUPLICATE_REVERSAL, got %+v", rb.Transaction)
+	}
+	w, err := wuc.Get(ctx, opened.ID)
+	if err != nil || w.Balance.AmountString() != "100.00" {
+		t.Fatalf("balance after blocked rollback=%+v", w)
+	}
+}
+
 func TestConcurrentBetsOneFails(t *testing.T) {
 	wuc, guc, _ := newUseCases(t)
 	ctx := context.Background()
@@ -182,6 +219,200 @@ func TestConcurrentBetsOneFails(t *testing.T) {
 	}
 	if processed != 1 || rejected != 1 {
 		t.Fatalf("processed=%d rejected=%d", processed, rejected)
+	}
+
+	w, err := wuc.Get(ctx, opened.ID)
+	if err != nil || w.Balance.AmountString() != "20.00" {
+		t.Fatalf("want balance 20.00, got %+v err=%v", w, err)
+	}
+	page, err := wuc.ListLedger(ctx, usecasewallet.ListLedgerInput{WalletID: opened.ID, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var debits int
+	for _, e := range page.Entries {
+		if e.Direction == domainwallet.DirectionDebit {
+			debits++
+		}
+	}
+	// OPENING credit + one BET debit
+	if debits != 1 {
+		t.Fatalf("want 1 debit ledger entry, got %d (entries=%d)", debits, len(page.Entries))
+	}
+
+	// Replays must not change the outcome.
+	for _, in := range inputs {
+		out, err := guc.Process(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = out
+	}
+	w2, err := wuc.Get(ctx, opened.ID)
+	if err != nil || w2.Balance.AmountString() != "20.00" {
+		t.Fatalf("balance after replay=%+v", w2)
+	}
+}
+
+func TestSameBetFiftyParallelOneDebit(t *testing.T) {
+	wuc, guc, _ := newUseCases(t)
+	ctx := context.Background()
+	opened, err := wuc.Open(ctx, usecasewallet.OpenInput{
+		PlayerID: "p-50", InitialBalance: mustParse(t, "100.00", "BRL"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := processIn(t, opened.ID, "p-50", domainwager.KindBet, "25.00", "bet-50", "")
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 50)
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := guc.Process(ctx, in)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("process: %v", err)
+		}
+	}
+	w, err := wuc.Get(ctx, opened.ID)
+	if err != nil || w.Balance.AmountString() != "75.00" {
+		t.Fatalf("balance=%+v", w)
+	}
+	page, err := wuc.ListLedger(ctx, usecasewallet.ListLedgerInput{WalletID: opened.ID, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var debits int
+	for _, e := range page.Entries {
+		if e.Direction == domainwallet.DirectionDebit {
+			debits++
+		}
+	}
+	if debits != 1 {
+		t.Fatalf("debits=%d", debits)
+	}
+}
+
+func TestDistinctWalletsParallel(t *testing.T) {
+	wuc, guc, _ := newUseCases(t)
+	ctx := context.Background()
+	a, err := wuc.Open(ctx, usecasewallet.OpenInput{PlayerID: "p-par-a", InitialBalance: mustParse(t, "50.00", "BRL")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := wuc.Open(ctx, usecasewallet.OpenInput{PlayerID: "p-par-b", InitialBalance: mustParse(t, "50.00", "USD")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err := guc.Process(ctx, processIn(t, a.ID, "p-par-a", domainwager.KindBet, "10.00", "par-a", ""))
+		if err != nil {
+			t.Error(err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		in := processIn(t, b.ID, "p-par-b", domainwager.KindBet, "10.00", "par-b", "")
+		in.Amount = mustParse(t, "10.00", "USD")
+		hash, _ := usecasewager.CanonicalPayloadHash(usecasewager.PayloadFields{
+			ProviderID: in.ProviderID, ExternalTransactionID: in.ExternalTransactionID,
+			PlayerID: in.PlayerID, WalletID: in.WalletID, RoundID: in.RoundID,
+			GameID: in.GameID, Kind: in.Kind, Amount: in.Amount,
+		})
+		in.PayloadHash = hash
+		_, err := guc.Process(ctx, in)
+		if err != nil {
+			t.Error(err)
+		}
+	}()
+	wg.Wait()
+	wa, _ := wuc.Get(ctx, a.ID)
+	wb, _ := wuc.Get(ctx, b.ID)
+	if wa.Balance.AmountString() != "40.00" || wb.Balance.AmountString() != "40.00" {
+		t.Fatalf("a=%s b=%s", wa.Balance.AmountString(), wb.Balance.AmountString())
+	}
+}
+
+func TestHTTPAndSQSSameOperation(t *testing.T) {
+	wuc, guc, _ := newUseCases(t)
+	ctx := context.Background()
+	opened, err := wuc.Open(ctx, usecasewallet.OpenInput{
+		PlayerID: "p-cross", InitialBalance: mustParse(t, "60.00", "BRL"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := processIn(t, opened.ID, "p-cross", domainwager.KindBet, "15.00", "cross-1", "")
+	httpOut, err := guc.Process(ctx, in)
+	if err != nil || httpOut.Transaction.Status() != domainwager.StatusProcessed {
+		t.Fatalf("http=%+v err=%v", httpOut, err)
+	}
+	sqsOut, err := guc.ProcessFromQueue(ctx, "wager-transactions", "msg-cross-1", "hash-cross", in)
+	if err != nil || !sqsOut.IdempotentReplay {
+		t.Fatalf("sqs replay=%+v err=%v", sqsOut, err)
+	}
+	w, err := wuc.Get(ctx, opened.ID)
+	if err != nil || w.Balance.AmountString() != "45.00" {
+		t.Fatalf("balance=%+v", w)
+	}
+}
+
+func TestThreeWorkersSameOutboxClaim(t *testing.T) {
+	// Multi-instance stand-in: three concurrent claimers on shared Postgres (SKIP LOCKED).
+	db := database.OpenTestDB(t)
+	ctx := context.Background()
+	repo := database.NewOutboxRepo()
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	err := db.WithinTx(ctx, func(q gateway.Querier) error {
+		for i := 0; i < 9; i++ {
+			if err := repo.Insert(ctx, q, gateway.OutboxRecord{
+				ID: fmt.Sprintf("multi-%d", i), EventType: "WagerTransactionProcessed",
+				AggregateID: "a", AggregateType: "WagerTransaction",
+				Payload: json.RawMessage(`{}`), OccurredAt: now, CreatedAt: now, NextAttemptAt: now,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	got := make(chan int, 3)
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		id := fmt.Sprintf("inst-%d", i)
+		go func() {
+			defer wg.Done()
+			var n int
+			_ = db.WithinTx(ctx, func(q gateway.Querier) error {
+				batch, err := repo.ClaimBatch(ctx, q, id, 3, now)
+				n = len(batch)
+				return err
+			})
+			got <- n
+		}()
+	}
+	wg.Wait()
+	close(got)
+	total := 0
+	for n := range got {
+		total += n
+	}
+	if total != 9 {
+		t.Fatalf("claimed total=%d", total)
 	}
 }
 

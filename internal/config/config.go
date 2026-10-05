@@ -18,9 +18,9 @@ type Config struct {
 	AWSAccessKeyID     string
 	AWSSecretAccessKey string
 
-	SQSWagerQueueURL         string
-	SQSWagerDLQURL           string
-	SQSDomainEventsQueueURL  string
+	SQSWagerQueueURL        string
+	SQSWagerDLQURL          string
+	SQSDomainEventsQueueURL string
 }
 
 // Load reads configuration from environment variables.

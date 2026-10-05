@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/DanielHermesGT/jungle-gaming-test/internal/database"
+	"github.com/DanielHermesGT/jungle-gaming-test/internal/observability"
 )
 
 // QueueReadyChecker verifies SQS readiness (optional in unit tests).
@@ -43,4 +44,9 @@ func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+// Metrics exposes process-local counters (README §12).
+func (h *HealthHandler) Metrics(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, observability.Snapshot())
 }

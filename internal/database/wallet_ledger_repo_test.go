@@ -32,7 +32,6 @@ func TestInsertWalletAndLedgerSameTx(t *testing.T) {
 	}
 
 	// Atomicidade: wallet + ledger no mesmo Commit.
-	// TODO(futuro): incluir wager/inbox/outbox nesta mesma Tx.
 	err = db.WithinTx(ctx, func(q gateway.Querier) error {
 		if err := wallets.Insert(ctx, q, opened.Wallet); err != nil {
 			return err
@@ -153,6 +152,41 @@ func TestGetByIDForUpdateAndUpdate(t *testing.T) {
 	}
 	if len(entries) != 2 {
 		t.Fatalf("entries=%d", len(entries))
+	}
+}
+
+func TestLedgerEntriesRejectUpdateDelete(t *testing.T) {
+	db := database.OpenTestDB(t)
+	ctx := context.Background()
+	wallets := database.NewWalletRepo()
+	ledgers := database.NewLedgerRepo()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+
+	opened, err := wallet.Open(wallet.OpenParams{
+		WalletID: "wallet-imm", PlayerID: "player-imm",
+		InitialBalance: mustParse(t, "10.00", "BRL"),
+		OpeningTxID:    "tx-imm", LedgerEntryID: "ledger-imm", Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.WithinTx(ctx, func(q gateway.Querier) error {
+		if err := wallets.Insert(ctx, q, opened.Wallet); err != nil {
+			return err
+		}
+		return ledgers.Insert(ctx, q, *opened.Ledger)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = db.Pool.Exec(ctx, `UPDATE wallet_ledger_entries SET amount_minor = 1 WHERE id = $1`, "ledger-imm")
+	if err == nil {
+		t.Fatal("expected UPDATE to be rejected")
+	}
+	_, err = db.Pool.Exec(ctx, `DELETE FROM wallet_ledger_entries WHERE id = $1`, "ledger-imm")
+	if err == nil {
+		t.Fatal("expected DELETE to be rejected")
 	}
 }
 
