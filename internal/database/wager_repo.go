@@ -159,9 +159,35 @@ WHERE status = 'PENDING_REFERENCE'
 ORDER BY pending_reference_until ASC, id ASC
 LIMIT $2`
 
-	rows, err := q.Query(ctx, sql, now.UTC(), limit)
+	return r.scanWagerList(ctx, q, sql, now.UTC(), limit)
+}
+
+func (r *WagerRepo) ListPendingReference(
+	ctx context.Context,
+	q gateway.Querier,
+	limit int,
+) ([]wager.Transaction, error) {
+	if limit < 1 {
+		limit = 50
+	}
+	sql := `SELECT ` + wagerSelectCols + `
+FROM wager_transactions
+WHERE status = 'PENDING_REFERENCE'
+ORDER BY pending_reference_until ASC NULLS LAST, id ASC
+LIMIT $1`
+
+	return r.scanWagerList(ctx, q, sql, limit)
+}
+
+func (r *WagerRepo) scanWagerList(
+	ctx context.Context,
+	q gateway.Querier,
+	sql string,
+	args ...any,
+) ([]wager.Transaction, error) {
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, fmt.Errorf("database: list pending reference: %w", err)
+		return nil, fmt.Errorf("database: list wager: %w", err)
 	}
 	defer rows.Close()
 
@@ -178,7 +204,7 @@ LIMIT $2`
 		out = append(out, tx)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("database: list pending reference: %w", err)
+		return nil, fmt.Errorf("database: list wager: %w", err)
 	}
 	return out, nil
 }

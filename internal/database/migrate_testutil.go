@@ -31,9 +31,7 @@ func applyMigrations(t *testing.T, db *DB) {
 
 	// Reset schema for isolated repo tests.
 	_, err := db.Pool.Exec(ctx, `
-DROP TABLE IF EXISTS wager_transactions;
-DROP TABLE IF EXISTS wallet_ledger_entries;
-DROP TABLE IF EXISTS wallets;
+DROP TABLE IF EXISTS inbox_messages, outbox_events, wager_transactions, wallet_ledger_entries, wallets CASCADE;
 `)
 	if err != nil {
 		t.Fatalf("reset schema: %v", err)
@@ -43,6 +41,7 @@ DROP TABLE IF EXISTS wallets;
 		"000001_wallets_ledger.up.sql",
 		"000002_wager_transactions.up.sql",
 		"000003_wager_pending_reference_ttl.up.sql",
+		"000004_inbox_outbox.up.sql",
 	} {
 		upSQL, err := os.ReadFile(migrationPath(name))
 		if err != nil {
